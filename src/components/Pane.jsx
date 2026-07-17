@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import ContextMenu from './ContextMenu.jsx';
 import FileIcon from './FileIcon.jsx';
+import BatchRenameDialog from './BatchRenameDialog.jsx';
 import {
   basename, parentPath, formatSize, formatDate, fileIcon, fileKind,
   sortEntries, isImage, isTextLike, isVideo, isAudio, localFileUrl,
@@ -62,6 +63,7 @@ export default function Pane({
   const [disk, setDisk] = useState(null);
   const [dragOver, setDragOver] = useState(null); // folder path or '' (pane background)
   const [copyJob, setCopyJob] = useState(null); // {jobId, copied, total, currentFile}
+  const [batchRename, setBatchRename] = useState(false);
   const rootRef = useRef(null);
   const addressInputRef = useRef(null);
   const searchInputRef = useRef(null);
@@ -225,6 +227,20 @@ export default function Pane({
     } else alert(res.error);
   }, [path, load]);
 
+  const applyBatchRename = useCallback(async (renames) => {
+    const items = [];
+    for (const { from, to } of renames) {
+      if (basename(from) === to) continue;
+      const res = await window.api.rename(from, to);
+      if (!res.ok) { alert(res.error); break; }
+      items.push({ from, to: res.path });
+    }
+    if (items.length) recordOp({ type: 'renameBatch', items });
+    setBatchRename(false);
+    setSelection(new Set());
+    load();
+  }, [load]);
+
   const runDeepSearch = useCallback(async (query) => {
     if (!query) { setDeepSearch(null); return; }
     setDeepSearch({ query, results: [], searching: true });
@@ -307,6 +323,7 @@ export default function Pane({
         { label: '붙여넣기', shortcut: '⌘V', disabled: !clipboard, onClick: doPaste },
         { separator: true },
         { label: '이름 바꾸기', shortcut: 'F2', disabled: multi, onClick: () => { setRenaming(entry.path); setRenameValue(entry.name); } },
+        ...(multi ? [{ label: '일괄 이름 변경…', onClick: () => setBatchRename(true) }] : []),
         { label: '휴지통으로 이동', shortcut: '⌘⌫', onClick: async () => {
             const res = await window.api.trash([...sel]);
             if (!res.ok) alert(res.error);
@@ -656,6 +673,13 @@ export default function Pane({
       </div>
 
       {menu && <ContextMenu x={menu.x} y={menu.y} items={menu.items} onClose={() => setMenu(null)} />}
+      {batchRename && (
+        <BatchRenameDialog
+          entries={selectedEntries}
+          onCancel={() => setBatchRename(false)}
+          onApply={applyBatchRename}
+        />
+      )}
     </div>
   );
 }
