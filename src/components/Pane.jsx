@@ -4,6 +4,7 @@ import {
   basename, parentPath, formatSize, formatDate, fileIcon, fileKind,
   sortEntries, isImage, isTextLike, isVideo, isAudio, localFileUrl,
 } from '../util.js';
+import { acceptsDrop, startDrag, dropToDir, notifyFsChanged } from '../dnd.js';
 
 function Preview({ entry }) {
   const [text, setText] = useState(null);
@@ -56,6 +57,7 @@ export default function Pane({
   const [showPreview, setShowPreview] = useState(false);
   const [menu, setMenu] = useState(null); // {x, y, items}
   const [disk, setDisk] = useState(null);
+  const [dragOver, setDragOver] = useState(null); // folder path or '' (pane background)
   const rootRef = useRef(null);
   const addressInputRef = useRef(null);
   const searchInputRef = useRef(null);
@@ -84,6 +86,15 @@ export default function Pane({
   }, [path]);
 
   useEffect(() => { load(); }, [load]);
+
+  // 다른 패널/사이드바에서 일어난 파일 작업 반영
+  useEffect(() => {
+    function onChanged(e) {
+      if (e.detail.dirs.includes(path)) load();
+    }
+    window.addEventListener('mx-fs-changed', onChanged);
+    return () => window.removeEventListener('mx-fs-changed', onChanged);
+  }, [path, load]);
 
   const displayed = useMemo(() => {
     let base = deepSearch ? deepSearch.results : entries;
@@ -176,6 +187,21 @@ export default function Pane({
     const res = await window.api.search(path, query);
     setDeepSearch({ query, results: res.ok ? res.entries : [], searching: false });
   }, [path]);
+
+  /* ---------- drag & drop ---------- */
+
+  const handleDragStart = useCallback((e, entry) => {
+    const paths = selection.has(entry.path) ? [...selection] : [entry.path];
+    if (!selection.has(entry.path)) setSelection(new Set([entry.path]));
+    startDrag(e, paths);
+  }, [selection]);
+
+  const handleDropOn = useCallback(async (e, destDir) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragOver(null);
+    await dropToDir(e, destDir);
+  }, []);
 
   /* ---------- selection ---------- */
 
@@ -388,7 +414,21 @@ export default function Pane({
       )}
 
       <div className="pane-body">
-        <div className="filelist" onContextMenu={handleEmptyContext} onClick={() => setSelection(new Set())}>
+        <div
+          className={`filelist ${dragOver === '' ? 'drag-over-bg' : ''}`}
+          onContextMenu={handleEmptyContext}
+          onClick={() => setSelection(new Set())}
+          onDragOver={(e) => {
+            if (!acceptsDrop(e)) return;
+            e.preventDefault();
+            e.dataTransfer.dropEffect = e.altKey ? 'copy' : 'move';
+            setDragOver('');
+          }}
+          onDragLeave={(e) => {
+            if (!e.currentTarget.contains(e.relatedTarget)) setDragOver(null);
+          }}
+          onDrop={(e) => handleDropOn(e, path)}
+        >
           <div className="fl-header">
             {sortHeader('name', '이름', 'col-name')}
             {sortHeader('mtime', '수정한 날짜', 'col-date')}
@@ -409,10 +449,24 @@ export default function Pane({
                   selection.has(entry.path) ? 'selected' : '',
                   entry.hidden ? 'hidden-file' : '',
                   clipboard?.mode === 'cut' && clipboard.paths.includes(entry.path) ? 'cut-pending' : '',
+                  dragOver === entry.path ? 'drag-over' : '',
                 ].join(' ')}
                 onClick={(e) => handleRowClick(e, entry, idx)}
                 onDoubleClick={() => openEntry(entry)}
                 onContextMenu={(e) => handleRowContext(e, entry)}
+                draggable={renaming !== entry.path}
+                onDragStart={(e) => handleDragStart(e, entry)}
+                {...(entry.isDir && !entry.name.endsWith('.app') ? {
+                  onDragOver: (e) => {
+                    if (!acceptsDrop(e)) return;
+                    e.preventDefault();
+                    e.stopPropagation();
+                    e.dataTransfer.dropEffect = e.altKey ? 'copy' : 'move';
+                    setDragOver(entry.path);
+                  },
+                  onDragLeave: () => setDragOver((v) => (v === entry.path ? null : v)),
+                  onDrop: (e) => handleDropOn(e, entry.path),
+                } : {})}
               >
                 <div className="col col-name">
                   <span className="fl-icon">{fileIcon(entry)}</span>

@@ -1,4 +1,4 @@
-const { contextBridge, ipcRenderer } = require('electron');
+const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
 contextBridge.exposeInMainWorld('api', {
   readDir: (p) => ipcRenderer.invoke('fs:readDir', p),
@@ -16,4 +16,5 @@ contextBridge.exposeInMainWorld('api', {
   exists: (p) => ipcRenderer.invoke('fs:exists', p),
   search: (root, query, opts) => ipcRenderer.invoke('fs:search', root, query, opts),
   copyTextToClipboard: (text) => ipcRenderer.invoke('clipboard:writeText', text),
+  pathForFile: (file) => webUtils.getPathForFile(file),
 });

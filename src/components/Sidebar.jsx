@@ -1,6 +1,24 @@
 import React, { useState, useCallback } from 'react';
+import { acceptsDrop, dropToDir } from '../dnd.js';
 
-function TreeNode({ node, depth, expanded, childrenMap, onToggle, onNavigate, currentPath }) {
+function dropTargetProps(destPath, dropTarget, setDropTarget) {
+  return {
+    onDragOver: (e) => {
+      if (!acceptsDrop(e)) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = e.altKey ? 'copy' : 'move';
+      setDropTarget(destPath);
+    },
+    onDragLeave: () => setDropTarget((v) => (v === destPath ? null : v)),
+    onDrop: async (e) => {
+      e.preventDefault();
+      setDropTarget(null);
+      await dropToDir(e, destPath);
+    },
+  };
+}
+
+function TreeNode({ node, depth, expanded, childrenMap, onToggle, onNavigate, currentPath, dropTarget, setDropTarget }) {
   const isOpen = expanded.has(node.path);
   const children = childrenMap[node.path];
   const isCurrent = currentPath === node.path;
@@ -8,9 +26,10 @@ function TreeNode({ node, depth, expanded, childrenMap, onToggle, onNavigate, cu
   return (
     <div>
       <div
-        className={`tree-row ${isCurrent ? 'current' : ''}`}
+        className={`tree-row ${isCurrent ? 'current' : ''} ${dropTarget === node.path ? 'drag-over' : ''}`}
         style={{ paddingLeft: 8 + depth * 14 }}
         onClick={() => onNavigate(node.path)}
+        {...dropTargetProps(node.path, dropTarget, setDropTarget)}
       >
         <span
           className={`tree-arrow ${isOpen ? 'open' : ''}`}
@@ -31,6 +50,8 @@ function TreeNode({ node, depth, expanded, childrenMap, onToggle, onNavigate, cu
           onToggle={onToggle}
           onNavigate={onNavigate}
           currentPath={currentPath}
+          dropTarget={dropTarget}
+          setDropTarget={setDropTarget}
         />
       ))}
       {isOpen && !children && (
@@ -43,6 +64,7 @@ function TreeNode({ node, depth, expanded, childrenMap, onToggle, onNavigate, cu
 export default function Sidebar({ special, onNavigate, currentPath }) {
   const [expanded, setExpanded] = useState(new Set());
   const [childrenMap, setChildrenMap] = useState({});
+  const [dropTarget, setDropTarget] = useState(null);
 
   const loadChildren = useCallback(async (p) => {
     const res = await window.api.readDir(p);
@@ -91,8 +113,9 @@ export default function Sidebar({ special, onNavigate, currentPath }) {
       {favorites.map((f) => (
         <div
           key={f.path}
-          className={`sb-item ${currentPath === f.path ? 'current' : ''}`}
+          className={`sb-item ${currentPath === f.path ? 'current' : ''} ${dropTarget === f.path ? 'drag-over' : ''}`}
           onClick={() => onNavigate(f.path)}
+          {...dropTargetProps(f.path, dropTarget, setDropTarget)}
         >
           <span className="sb-icon">{f.icon}</span>
           <span>{f.name}</span>
@@ -110,6 +133,8 @@ export default function Sidebar({ special, onNavigate, currentPath }) {
             onToggle={onToggle}
             onNavigate={onNavigate}
             currentPath={currentPath}
+            dropTarget={dropTarget}
+            setDropTarget={setDropTarget}
           />
         ))}
       </div>
