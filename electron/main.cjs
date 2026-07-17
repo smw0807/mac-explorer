@@ -295,6 +295,13 @@ ipcMain.handle('fs:newFile', async (_e, parent, name) => {
   } catch (err) { return fail(err); }
 });
 
+ipcMain.handle('fs:fileIcon', async (_e, p) => {
+  try {
+    const img = await app.getFileIcon(p, { size: 'normal' });
+    return ok({ dataUrl: img.toDataURL() });
+  } catch (err) { return fail(err); }
+});
+
 ipcMain.handle('fs:open', async (_e, p) => {
   const err = await shell.openPath(p);
   return err ? fail(new Error(err)) : ok({});

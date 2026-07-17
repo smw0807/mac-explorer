@@ -17,6 +17,7 @@ contextBridge.exposeInMainWorld('api', {
   search: (root, query, opts) => ipcRenderer.invoke('fs:search', root, query, opts),
   copyTextToClipboard: (text) => ipcRenderer.invoke('clipboard:writeText', text),
   pathForFile: (file) => webUtils.getPathForFile(file),
+  fileIcon: (p) => ipcRenderer.invoke('fs:fileIcon', p),
   copyStart: (paths, destDir) => ipcRenderer.invoke('fs:copyStart', paths, destDir),
   copyCancel: (jobId) => ipcRenderer.invoke('fs:copyCancel', jobId),
   onCopyProgress: (cb) => {

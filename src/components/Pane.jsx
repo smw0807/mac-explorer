@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import ContextMenu from './ContextMenu.jsx';
+import FileIcon from './FileIcon.jsx';
 import {
   basename, parentPath, formatSize, formatDate, fileIcon, fileKind,
   sortEntries, isImage, isTextLike, isVideo, isAudio, localFileUrl,
@@ -546,7 +547,7 @@ export default function Pane({
                   <div className="gi-thumb">
                     {isImage(entry) && entry.ext !== 'heic'
                       ? <img src={localFileUrl(entry.path)} loading="lazy" alt="" draggable={false} />
-                      : <span className="gi-icon">{fileIcon(entry)}</span>}
+                      : <FileIcon entry={entry} size={48} className="gi-icon" />}
                   </div>
                   {renaming === entry.path ? renameField : (
                     <div className="gi-name" title={deepSearch ? entry.path : entry.name}>{entry.name}</div>
@@ -556,7 +557,7 @@ export default function Pane({
               : displayed.map((entry, idx) => (
                 <div key={entry.path} className={entryClass(entry, 'fl-row')} {...entryProps(entry, idx)}>
                   <div className="col col-name">
-                    <span className="fl-icon">{fileIcon(entry)}</span>
+                    <FileIcon entry={entry} size={16} />
                     {renaming === entry.path ? renameField : (
                       <span className="fl-name" title={deepSearch ? entry.path : entry.name}>{entry.name}</span>
                     )}
