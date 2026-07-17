@@ -293,6 +293,12 @@ export default function Pane({
       items: [
         { label: '열기', onClick: () => openEntry(entry) },
         ...(entry.isDir ? [{ label: '새 탭에서 열기', onClick: () => onOpenInNewTab(entry.path) }] : []),
+        ...(!entry.isDir && !multi ? [{ label: '다음으로 열기…', onClick: async () => {
+            const r = await window.api.pickApp();
+            if (!r.ok || !r.path) return;
+            const res = await window.api.openWithApp(entry.path, r.path);
+            if (!res.ok) alert(res.error);
+          } }] : []),
         { label: 'Finder에서 보기', onClick: () => window.api.reveal(entry.path) },
         { label: 'Quick Look', shortcut: '⌘Y', onClick: () => window.api.quickLook(entry.path) },
         { separator: true },

@@ -352,6 +352,25 @@ ipcMain.handle('fs:open', async (_e, p) => {
   return err ? fail(new Error(err)) : ok({});
 });
 
+// '다음으로 열기': 앱 선택 후 open -a로 실행
+ipcMain.handle('ui:pickApp', async (e) => {
+  const win = BrowserWindow.fromWebContents(e.sender);
+  const r = await dialog.showOpenDialog(win, {
+    title: '연결할 앱 선택',
+    defaultPath: '/Applications',
+    properties: ['openFile'],
+    filters: [{ name: '응용 프로그램', extensions: ['app'] }],
+  });
+  return ok({ path: r.canceled || !r.filePaths.length ? null : r.filePaths[0] });
+});
+
+ipcMain.handle('fs:openWithApp', async (_e, filePath, appPath) => {
+  try {
+    await execFileP('open', ['-a', appPath, filePath]);
+    return ok({});
+  } catch (err) { return fail(err); }
+});
+
 // macOS Quick Look 미리보기 (qlmanage)
 ipcMain.handle('fs:quickLook', (_e, p) => {
   try {

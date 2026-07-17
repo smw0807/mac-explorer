@@ -14,6 +14,8 @@ contextBridge.exposeInMainWorld('api', {
   open: (p) => ipcRenderer.invoke('fs:open', p),
   reveal: (p) => ipcRenderer.invoke('fs:reveal', p),
   quickLook: (p) => ipcRenderer.invoke('fs:quickLook', p),
+  pickApp: () => ipcRenderer.invoke('ui:pickApp'),
+  openWithApp: (filePath, appPath) => ipcRenderer.invoke('fs:openWithApp', filePath, appPath),
   readText: (p, maxBytes) => ipcRenderer.invoke('fs:readText', p, maxBytes),
   statfs: (p) => ipcRenderer.invoke('fs:statfs', p),
   exists: (p) => ipcRenderer.invoke('fs:exists', p),
