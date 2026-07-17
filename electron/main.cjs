@@ -10,7 +10,9 @@ protocol.registerSchemesAsPrivileged([
   { scheme: 'localfile', privileges: { stream: true, bypassCSP: true, supportFetchAPI: true } },
 ]);
 
-const isDev = !app.isPackaged;
+// `electron .` runs unpackaged even for production builds (npm start),
+// so dev mode requires the dev script to opt in via VITE_DEV=1
+const isDev = !app.isPackaged && process.env.VITE_DEV === '1';
 
 function createWindow() {
   const win = new BrowserWindow({

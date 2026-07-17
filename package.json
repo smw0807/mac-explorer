@@ -5,7 +5,7 @@
   "description": "Windows Explorer style file manager for macOS",
   "main": "electron/main.cjs",
   "scripts": {
-    "dev": "concurrently -k \"vite\" \"wait-on http://localhost:5173 && electron .\"",
+    "dev": "concurrently -k \"vite\" \"wait-on http://localhost:5173 && VITE_DEV=1 electron .\"",
     "build": "vite build",
     "start": "npm run build && electron .",
     "dist": "npm run build && electron-builder --mac"
