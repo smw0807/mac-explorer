@@ -297,6 +297,19 @@ export default function Pane({
             load();
           } },
         { separator: true },
+        { label: '압축하기', onClick: async () => {
+            const res = await window.api.compress([...sel]);
+            if (!res.ok) alert(res.error);
+            else recordOp({ type: 'create', path: res.path });
+            load();
+          } },
+        ...(!multi && entry.ext === 'zip' ? [{ label: '압축 해제', onClick: async () => {
+            const res = await window.api.extract(entry.path);
+            if (!res.ok) alert(res.error);
+            else recordOp({ type: 'create', path: res.path });
+            load();
+          } }] : []),
+        { separator: true },
         { label: '경로 복사', onClick: () => window.api.copyTextToClipboard([...sel].join('\n')) },
       ],
     });

@@ -4,6 +4,9 @@ const fs = require('fs');
 const fsp = require('fs/promises');
 const os = require('os');
 const { pathToFileURL } = require('url');
+const { execFile } = require('child_process');
+const { promisify } = require('util');
+const execFileP = promisify(execFile);
 
 // custom protocol for previewing local files (images/video) in the renderer
 protocol.registerSchemesAsPrivileged([
@@ -378,6 +381,28 @@ ipcMain.handle('fs:exists', async (_e, p) => {
   } catch {
     return ok({ exists: false, isDir: false });
   }
+});
+
+/* ---------- zip (compress / extract) ---------- */
+
+// 선택 항목들을 같은 폴더에 zip으로 압축 (Finder처럼 단일 항목은 그 이름, 여러 개면 '보관')
+ipcMain.handle('fs:compress', async (_e, paths) => {
+  try {
+    const cwd = path.dirname(paths[0]);
+    const zipName = (paths.length === 1 ? path.basename(paths[0]) : '보관') + '.zip';
+    const zipPath = await uniqueDest(cwd, zipName);
+    await execFileP('/usr/bin/zip', ['-r', '-y', zipPath, ...paths.map((p) => path.basename(p))],
+      { cwd, maxBuffer: 64 * 1024 * 1024 });
+    return ok({ path: zipPath });
+  } catch (err) { return fail(err); }
+});
+
+ipcMain.handle('fs:extract', async (_e, zipPath) => {
+  try {
+    const dest = await uniqueDest(path.dirname(zipPath), path.basename(zipPath).replace(/\.zip$/i, ''));
+    await execFileP('/usr/bin/ditto', ['-x', '-k', zipPath, dest]);
+    return ok({ path: dest });
+  } catch (err) { return fail(err); }
 });
 
 /* ---------- settings (session/favorites persistence) ---------- */
