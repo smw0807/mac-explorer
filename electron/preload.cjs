@@ -17,6 +17,7 @@ contextBridge.exposeInMainWorld('api', {
   statfs: (p) => ipcRenderer.invoke('fs:statfs', p),
   exists: (p) => ipcRenderer.invoke('fs:exists', p),
   search: (root, query, opts) => ipcRenderer.invoke('fs:search', root, query, opts),
+  searchSpotlight: (root, query) => ipcRenderer.invoke('fs:searchSpotlight', root, query),
   copyTextToClipboard: (text) => ipcRenderer.invoke('clipboard:writeText', text),
   pathForFile: (file) => webUtils.getPathForFile(file),
   fileIcon: (p) => ipcRenderer.invoke('fs:fileIcon', p),

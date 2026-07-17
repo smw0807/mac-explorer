@@ -470,6 +470,21 @@ ipcMain.handle('clipboard:writeText', (_e, text) => {
   return ok({});
 });
 
+// Spotlight(mdfind) 검색: 파일 이름 + 내용, 인덱스 기반이라 즉시 응답
+ipcMain.handle('fs:searchSpotlight', async (_e, rootPath, query) => {
+  try {
+    const q = query.replace(/["\\]/g, '');
+    const { stdout } = await execFileP('mdfind',
+      ['-onlyin', rootPath, `(kMDItemFSName == "*${q}*"cd) || (kMDItemTextContent == "${q}"cd)`],
+      { maxBuffer: 16 * 1024 * 1024 });
+    const lines = stdout.split('\n').filter(Boolean).slice(0, 500);
+    const entries = (await Promise.all(
+      lines.map((p) => entryInfo(path.dirname(p), path.basename(p)))
+    )).filter(Boolean);
+    return ok({ entries });
+  } catch (err) { return fail(err); }
+});
+
 // Recursive search with limits
 ipcMain.handle('fs:search', async (_e, rootPath, query, opts = {}) => {
   const maxResults = opts.maxResults || 500;

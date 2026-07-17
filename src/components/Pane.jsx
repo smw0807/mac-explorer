@@ -231,6 +231,15 @@ export default function Pane({
     setDeepSearch({ query, results: res.ok ? res.entries : [], searching: false });
   }, [path]);
 
+  // Spotlight 인덱스 기반 검색 (이름 + 내용)
+  const runSpotlight = useCallback(async (query) => {
+    if (!query) { setDeepSearch(null); return; }
+    setDeepSearch({ query, results: [], searching: true, spotlight: true });
+    const res = await window.api.searchSpotlight(path, query);
+    if (!res.ok) alert(res.error);
+    setDeepSearch({ query, results: res.ok ? res.entries : [], searching: false, spotlight: true });
+  }, [path]);
+
   /* ---------- drag & drop ---------- */
 
   const handleDragStart = useCallback((e, entry) => {
@@ -504,11 +513,15 @@ export default function Pane({
         <input
           className="search-input"
           ref={searchInputRef}
-          placeholder="검색 (Enter: 하위 폴더까지)"
+          placeholder="검색 (Enter: 하위 폴더, ⌘Enter: Spotlight)"
           value={deepSearch ? deepSearch.query : filter}
           onChange={(e) => { setDeepSearch(null); setFilter(e.target.value); }}
           onKeyDown={(e) => {
-            if (e.key === 'Enter') runDeepSearch(e.target.value.trim());
+            if (e.key === 'Enter') {
+              const q = e.target.value.trim();
+              if (e.metaKey) runSpotlight(q);
+              else runDeepSearch(q);
+            }
             if (e.key === 'Escape') { setFilter(''); setDeepSearch(null); e.target.blur(); }
           }}
         />
@@ -527,8 +540,8 @@ export default function Pane({
       {deepSearch && (
         <div className="search-banner">
           {deepSearch.searching
-            ? `"${deepSearch.query}" 검색 중…`
-            : `"${deepSearch.query}" 검색 결과 ${deepSearch.results.length}개`}
+            ? `${deepSearch.spotlight ? 'Spotlight ' : ''}"${deepSearch.query}" 검색 중…`
+            : `${deepSearch.spotlight ? 'Spotlight ' : ''}"${deepSearch.query}" 검색 결과 ${deepSearch.results.length}개`}
           <button onClick={() => { setDeepSearch(null); setFilter(''); }}>✕ 닫기</button>
         </div>
       )}
