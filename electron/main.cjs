@@ -352,6 +352,15 @@ ipcMain.handle('fs:open', async (_e, p) => {
   return err ? fail(new Error(err)) : ok({});
 });
 
+// macOS Quick Look 미리보기 (qlmanage)
+ipcMain.handle('fs:quickLook', (_e, p) => {
+  try {
+    const child = require('child_process').spawn('qlmanage', ['-p', p], { detached: true, stdio: 'ignore' });
+    child.unref();
+    return ok({});
+  } catch (err) { return fail(err); }
+});
+
 ipcMain.handle('fs:reveal', async (_e, p) => {
   shell.showItemInFolder(p);
   return ok({});

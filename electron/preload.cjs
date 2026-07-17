@@ -13,6 +13,7 @@ contextBridge.exposeInMainWorld('api', {
   newFile: (parent, name) => ipcRenderer.invoke('fs:newFile', parent, name),
   open: (p) => ipcRenderer.invoke('fs:open', p),
   reveal: (p) => ipcRenderer.invoke('fs:reveal', p),
+  quickLook: (p) => ipcRenderer.invoke('fs:quickLook', p),
   readText: (p, maxBytes) => ipcRenderer.invoke('fs:readText', p, maxBytes),
   statfs: (p) => ipcRenderer.invoke('fs:statfs', p),
   exists: (p) => ipcRenderer.invoke('fs:exists', p),

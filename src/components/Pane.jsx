@@ -294,6 +294,7 @@ export default function Pane({
         { label: '열기', onClick: () => openEntry(entry) },
         ...(entry.isDir ? [{ label: '새 탭에서 열기', onClick: () => onOpenInNewTab(entry.path) }] : []),
         { label: 'Finder에서 보기', onClick: () => window.api.reveal(entry.path) },
+        { label: 'Quick Look', shortcut: '⌘Y', onClick: () => window.api.quickLook(entry.path) },
         { separator: true },
         { label: '잘라내기', shortcut: '⌘X', onClick: () => setClipboard({ mode: 'cut', paths: [...sel] }) },
         { label: '복사', shortcut: '⌘C', onClick: () => setClipboard({ mode: 'copy', paths: [...sel] }) },
@@ -357,6 +358,7 @@ export default function Pane({
     if (meta && e.key === 'r') { e.preventDefault(); load(); return; }
     if (meta && e.key === 'l') { e.preventDefault(); setAddressValue(path); setAddressEdit(true); return; }
     if (meta && e.key === 'f') { e.preventDefault(); searchInputRef.current?.focus(); return; }
+    if (meta && e.key === 'y') { e.preventDefault(); selectedEntries[0] && window.api.quickLook(selectedEntries[0].path); return; }
     if (meta && e.shiftKey && e.key.toLowerCase() === 'n') { e.preventDefault(); newFolder(); return; }
     if (meta && e.key === 'ArrowUp') { e.preventDefault(); if (path !== '/') navigate(parentPath(path)); return; }
     if (meta && e.key === 'ArrowDown') { e.preventDefault(); selectedEntries[0] && openEntry(selectedEntries[0]); return; }
