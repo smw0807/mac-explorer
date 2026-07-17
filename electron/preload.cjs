@@ -17,6 +17,13 @@ contextBridge.exposeInMainWorld('api', {
   search: (root, query, opts) => ipcRenderer.invoke('fs:search', root, query, opts),
   copyTextToClipboard: (text) => ipcRenderer.invoke('clipboard:writeText', text),
   pathForFile: (file) => webUtils.getPathForFile(file),
+  copyStart: (paths, destDir) => ipcRenderer.invoke('fs:copyStart', paths, destDir),
+  copyCancel: (jobId) => ipcRenderer.invoke('fs:copyCancel', jobId),
+  onCopyProgress: (cb) => {
+    const listener = (_e, data) => cb(data);
+    ipcRenderer.on('fs:copyProgress', listener);
+    return () => ipcRenderer.removeListener('fs:copyProgress', listener);
+  },
   watchDir: (paneId, dirPath) => ipcRenderer.invoke('fs:watch', paneId, dirPath),
   unwatchDir: (paneId) => ipcRenderer.invoke('fs:unwatch', paneId),
   onDirChanged: (cb) => {

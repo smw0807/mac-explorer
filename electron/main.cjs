@@ -140,6 +140,110 @@ ipcMain.handle('fs:copy', async (_e, paths, destDir) => {
   } catch (err) { return fail(err); }
 });
 
+/* ---------- copy with progress ---------- */
+
+let copyJobSeq = 0;
+const copyJobs = new Map(); // jobId → { canceled }
+
+async function treeSize(p) {
+  const st = await fsp.lstat(p);
+  if (!st.isDirectory()) return st.size;
+  let sum = 0;
+  for (const n of await fsp.readdir(p)) sum += await treeSize(path.join(p, n));
+  return sum;
+}
+
+function cancelError() {
+  return Object.assign(new Error('취소됨'), { canceled: true });
+}
+
+function copyFileStream(job, src, dest, onBytes) {
+  return new Promise((resolve, reject) => {
+    const rs = fs.createReadStream(src);
+    const ws = fs.createWriteStream(dest, { flags: 'wx' });
+    rs.on('data', (chunk) => {
+      if (job.canceled) {
+        rs.destroy();
+        ws.destroy();
+        reject(cancelError());
+        return;
+      }
+      onBytes(chunk.length);
+    });
+    rs.on('error', reject);
+    ws.on('error', reject);
+    ws.on('close', resolve);
+    rs.pipe(ws);
+  });
+}
+
+async function copyTree(job, src, dest, report) {
+  if (job.canceled) throw cancelError();
+  const st = await fsp.lstat(src);
+  if (st.isSymbolicLink()) {
+    await fsp.symlink(await fsp.readlink(src), dest);
+  } else if (st.isDirectory()) {
+    await fsp.mkdir(dest);
+    for (const n of await fsp.readdir(src)) {
+      await copyTree(job, path.join(src, n), path.join(dest, n), report);
+    }
+  } else {
+    report.currentFile = src;
+    await copyFileStream(job, src, dest, (n) => { report.copied += n; });
+  }
+}
+
+ipcMain.handle('fs:copyStart', (e, paths, destDir) => {
+  const jobId = ++copyJobSeq;
+  const job = { canceled: false };
+  copyJobs.set(jobId, job);
+  const sender = e.sender;
+
+  (async () => {
+    const report = { copied: 0, total: 0, currentFile: '' };
+    const send = (extra = {}) => {
+      if (!sender.isDestroyed()) {
+        sender.send('fs:copyProgress', {
+          jobId, copied: report.copied, total: report.total, currentFile: report.currentFile, ...extra,
+        });
+      }
+    };
+    const timer = setInterval(() => send(), 100);
+    let inFlightDest = null; // 복사가 끝나지 않은 항목만 취소/실패 시 정리
+    try {
+      for (const p of paths) report.total += await treeSize(p);
+      send();
+      for (const p of paths) {
+        if (job.canceled) throw cancelError();
+        const sameDir = path.dirname(p) === destDir;
+        const dest = sameDir
+          ? await uniqueDest(destDir, path.basename(p))
+          : path.join(destDir, path.basename(p));
+        if (!sameDir && fs.existsSync(dest)) throw new Error(`이미 존재합니다: ${path.basename(p)}`);
+        inFlightDest = dest;
+        await copyTree(job, p, dest, report);
+        inFlightDest = null;
+      }
+      clearInterval(timer);
+      send({ done: true });
+    } catch (err) {
+      clearInterval(timer);
+      if (inFlightDest) await fsp.rm(inFlightDest, { recursive: true, force: true }).catch(() => {});
+      send({ done: true, canceled: !!err.canceled, error: err.canceled ? null : (err.message || String(err)) });
+    } finally {
+      copyJobs.delete(jobId);
+    }
+  })();
+
+  return ok({ jobId });
+});
+
+ipcMain.handle('fs:copyCancel', (_e, jobId) => {
+  const job = copyJobs.get(jobId);
+  if (job) job.canceled = true;
+  return ok({});
+});
+
 ipcMain.handle('fs:move', async (_e, paths, destDir) => {
   try {
     for (const p of paths) {

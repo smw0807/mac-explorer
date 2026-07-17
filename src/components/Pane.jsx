@@ -58,6 +58,7 @@ export default function Pane({
   const [menu, setMenu] = useState(null); // {x, y, items}
   const [disk, setDisk] = useState(null);
   const [dragOver, setDragOver] = useState(null); // folder path or '' (pane background)
+  const [copyJob, setCopyJob] = useState(null); // {jobId, copied, total, currentFile}
   const rootRef = useRef(null);
   const addressInputRef = useRef(null);
   const searchInputRef = useRef(null);
@@ -137,12 +138,35 @@ export default function Pane({
 
   const doPaste = useCallback(async () => {
     if (!clipboard) return;
-    const fn = clipboard.mode === 'copy' ? window.api.copy : window.api.move;
-    const res = await fn(clipboard.paths, path);
+    if (clipboard.mode === 'copy') {
+      const res = await window.api.copyStart(clipboard.paths, path);
+      if (!res.ok) { alert(res.error); return; }
+      setCopyJob({ jobId: res.jobId, copied: 0, total: 0, currentFile: '' });
+      return;
+    }
+    const res = await window.api.move(clipboard.paths, path);
     if (!res.ok) alert(res.error);
-    if (clipboard.mode === 'cut') setClipboard(null);
+    setClipboard(null);
     load();
   }, [clipboard, path, setClipboard, load]);
+
+  // 진행 중인 복사 작업의 진행률 이벤트 반영
+  useEffect(() => {
+    if (!copyJob) return;
+    const off = window.api.onCopyProgress((d) => {
+      if (d.jobId !== copyJob.jobId) return;
+      if (d.done) {
+        setCopyJob(null);
+        if (d.error) alert(d.error);
+        load();
+      } else {
+        setCopyJob((j) => (j && j.jobId === d.jobId
+          ? { ...j, copied: d.copied, total: d.total, currentFile: d.currentFile }
+          : j));
+      }
+    });
+    return off;
+  }, [copyJob?.jobId, load]);
 
   const doTrash = useCallback(async () => {
     if (!selection.size) return;
@@ -510,6 +534,22 @@ export default function Pane({
         </div>
         {showPreview && <Preview entry={selectedEntries[0] || null} />}
       </div>
+
+      {copyJob && (
+        <div className="copy-progress">
+          <span className="cp-info">
+            복사 중… {copyJob.currentFile ? basename(copyJob.currentFile) : '준비 중'}
+            {copyJob.total > 0 && ` (${formatSize(copyJob.copied) || '0 B'} / ${formatSize(copyJob.total)})`}
+          </span>
+          <div className="cp-bar">
+            <div
+              className="cp-fill"
+              style={{ width: `${copyJob.total ? Math.min(100, (copyJob.copied / copyJob.total) * 100) : 0}%` }}
+            />
+          </div>
+          <button className="cp-cancel" onClick={() => window.api.copyCancel(copyJob.jobId)}>취소</button>
+        </div>
+      )}
 
       <div className="statusbar">
         <span>{displayed.length}개 항목{selection.size > 0 ? ` · ${selection.size}개 선택됨` : ''}</span>

@@ -212,6 +212,23 @@ html, body, #root {
 .preview-meta { text-align: center; color: var(--text-dim); font-size: 12px; line-height: 1.6; width: 100%; }
 .preview-name { color: var(--text); font-weight: 600; word-break: break-all; }
 
+/* ---------- copy progress ---------- */
+.copy-progress {
+  display: flex; align-items: center; gap: 10px;
+  padding: 6px 12px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-panel);
+  font-size: 12px; flex-shrink: 0;
+}
+.cp-info {
+  flex-shrink: 0; color: var(--text-dim); max-width: 45%;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.cp-bar { flex: 1; height: 6px; border-radius: 3px; background: var(--bg-hover); overflow: hidden; }
+.cp-fill { height: 100%; background: var(--accent); transition: width 0.1s linear; }
+.cp-cancel { background: none; border: none; color: var(--text-dim); cursor: pointer; font-size: 11px; }
+.cp-cancel:hover { color: var(--text); }
+
 /* ---------- statusbar ---------- */
 .statusbar {
   display: flex; justify-content: space-between;
