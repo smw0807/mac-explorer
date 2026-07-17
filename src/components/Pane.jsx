@@ -65,6 +65,7 @@ export default function Pane({
   const rootRef = useRef(null);
   const addressInputRef = useRef(null);
   const searchInputRef = useRef(null);
+  const typeAheadRef = useRef({ s: '', t: 0 });
 
   const navigate = useCallback((p) => {
     setHist((h) => {
@@ -365,6 +366,22 @@ export default function Pane({
     if (e.key === 'Enter') { e.preventDefault(); selectedEntries[0] && openEntry(selectedEntries[0]); return; }
     if (e.key === ' ') { e.preventDefault(); setShowPreview((v) => !v); return; }
     if (e.key === 'Escape') { setSelection(new Set()); setDeepSearch(null); setFilter(''); return; }
+
+    // 타이핑 점프: 연속 입력(700ms)한 글자로 시작하는 항목을 선택
+    if (!meta && !e.altKey && e.key.length === 1 && e.key !== ' ') {
+      e.preventDefault();
+      const now = Date.now();
+      const buf = now - typeAheadRef.current.t < 700 ? typeAheadRef.current.s : '';
+      const q = (buf + e.key).toLowerCase();
+      typeAheadRef.current = { s: q, t: now };
+      const idx = displayed.findIndex((x) => x.name.toLowerCase().startsWith(q));
+      if (idx >= 0) {
+        setSelection(new Set([displayed[idx].path]));
+        anchorRef.current = idx;
+        rootRef.current?.querySelector(`[data-idx="${idx}"]`)?.scrollIntoView({ block: 'nearest' });
+      }
+      return;
+    }
 
     if (['ArrowDown', 'ArrowUp', 'ArrowLeft', 'ArrowRight'].includes(e.key)) {
       const isGrid = view === 'grid';
