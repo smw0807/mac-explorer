@@ -55,6 +55,7 @@ export default function Pane({
   const [addressEdit, setAddressEdit] = useState(false);
   const [addressValue, setAddressValue] = useState('');
   const [showPreview, setShowPreview] = useState(false);
+  const [view, setView] = useState('list'); // 'list' | 'grid'
   const [menu, setMenu] = useState(null); // {x, y, items}
   const [disk, setDisk] = useState(null);
   const [dragOver, setDragOver] = useState(null); // folder path or '' (pane background)
@@ -334,18 +335,28 @@ export default function Pane({
     if (e.key === ' ') { e.preventDefault(); setShowPreview((v) => !v); return; }
     if (e.key === 'Escape') { setSelection(new Set()); setDeepSearch(null); setFilter(''); return; }
 
-    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    if (['ArrowDown', 'ArrowUp', 'ArrowLeft', 'ArrowRight'].includes(e.key)) {
+      const isGrid = view === 'grid';
+      if (!isGrid && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) return;
       e.preventDefault();
       if (!displayed.length) return;
+      let cols = 1;
+      if (isGrid) {
+        const grid = rootRef.current?.querySelector('.fl-rows.grid');
+        if (grid) cols = getComputedStyle(grid).gridTemplateColumns.split(' ').length;
+      }
+      const delta = e.key === 'ArrowDown' ? cols
+        : e.key === 'ArrowUp' ? -cols
+        : e.key === 'ArrowRight' ? 1 : -1;
       const cur = displayed.findIndex((x) => selection.has(x.path));
       let next;
-      if (cur === -1) next = e.key === 'ArrowDown' ? 0 : displayed.length - 1;
-      else next = Math.min(displayed.length - 1, Math.max(0, cur + (e.key === 'ArrowDown' ? 1 : -1)));
+      if (cur === -1) next = delta > 0 ? 0 : displayed.length - 1;
+      else next = Math.min(displayed.length - 1, Math.max(0, cur + delta));
       setSelection(new Set([displayed[next].path]));
       anchorRef.current = next;
       rootRef.current?.querySelector(`[data-idx="${next}"]`)?.scrollIntoView({ block: 'nearest' });
     }
-  }, [displayed, selection, selectedEntries, doCopy, doCut, doPaste, doTrash, startRename, openEntry, navigate, path, load, newFolder]);
+  }, [displayed, selection, selectedEntries, doCopy, doCut, doPaste, doTrash, startRename, openEntry, navigate, path, load, newFolder, view]);
 
   /* ---------- render ---------- */
 
@@ -356,6 +367,55 @@ export default function Pane({
     for (const p of parts) { acc += '/' + p; segs.push({ name: p, path: acc }); }
     return segs;
   }, [path]);
+
+  const entryClass = (entry, base) => [
+    base,
+    selection.has(entry.path) ? 'selected' : '',
+    entry.hidden ? 'hidden-file' : '',
+    clipboard?.mode === 'cut' && clipboard.paths.includes(entry.path) ? 'cut-pending' : '',
+    dragOver === entry.path ? 'drag-over' : '',
+  ].join(' ');
+
+  // 리스트 행과 그리드 타일이 공유하는 인터랙션 props
+  const entryProps = (entry, idx) => ({
+    'data-idx': idx,
+    onClick: (e) => handleRowClick(e, entry, idx),
+    onDoubleClick: () => openEntry(entry),
+    onContextMenu: (e) => handleRowContext(e, entry),
+    draggable: renaming !== entry.path,
+    onDragStart: (e) => handleDragStart(e, entry),
+    ...(entry.isDir && !entry.name.endsWith('.app') ? {
+      onDragOver: (e) => {
+        if (!acceptsDrop(e)) return;
+        e.preventDefault();
+        e.stopPropagation();
+        e.dataTransfer.dropEffect = e.altKey ? 'copy' : 'move';
+        setDragOver(entry.path);
+      },
+      onDragLeave: () => setDragOver((v) => (v === entry.path ? null : v)),
+      onDrop: (e) => handleDropOn(e, entry.path),
+    } : {}),
+  });
+
+  const renameField = (
+    <input
+      className="rename-input"
+      autoFocus
+      value={renameValue}
+      onChange={(e) => setRenameValue(e.target.value)}
+      onFocus={(e) => {
+        const dot = e.target.value.lastIndexOf('.');
+        e.target.setSelectionRange(0, dot > 0 ? dot : e.target.value.length);
+      }}
+      onBlur={commitRename}
+      onKeyDown={(e) => {
+        e.stopPropagation();
+        if (e.key === 'Enter') commitRename();
+        if (e.key === 'Escape') setRenaming(null);
+      }}
+      onClick={(e) => e.stopPropagation()}
+    />
+  );
 
   const sortHeader = (key, label, cls) => (
     <div
@@ -431,6 +491,11 @@ export default function Pane({
           }}
         />
         <button
+          className={`tb-btn ${view === 'grid' ? 'on' : ''}`}
+          onClick={() => setView((v) => (v === 'list' ? 'grid' : 'list'))}
+          title={view === 'list' ? '아이콘 보기' : '목록 보기'}
+        >{view === 'list' ? '⊞' : '☰'}</button>
+        <button
           className={`tb-btn ${showPreview ? 'on' : ''}`}
           onClick={() => setShowPreview((v) => !v)}
           title="미리보기 (Space)"
@@ -462,74 +527,45 @@ export default function Pane({
           }}
           onDrop={(e) => handleDropOn(e, path)}
         >
-          <div className="fl-header">
-            {sortHeader('name', '이름', 'col-name')}
-            {sortHeader('mtime', '수정한 날짜', 'col-date')}
-            {sortHeader('kind', '유형', 'col-kind')}
-            {sortHeader('size', '크기', 'col-size')}
-          </div>
-          <div className="fl-rows">
+          {view === 'list' && (
+            <div className="fl-header">
+              {sortHeader('name', '이름', 'col-name')}
+              {sortHeader('mtime', '수정한 날짜', 'col-date')}
+              {sortHeader('kind', '유형', 'col-kind')}
+              {sortHeader('size', '크기', 'col-size')}
+            </div>
+          )}
+          <div className={`fl-rows ${view === 'grid' ? 'grid' : ''}`}>
             {error && <div className="fl-error">⚠️ {error}</div>}
             {!error && displayed.length === 0 && (
               <div className="fl-empty">{deepSearch?.searching ? '검색 중…' : '비어 있는 폴더'}</div>
             )}
-            {displayed.map((entry, idx) => (
-              <div
-                key={entry.path}
-                data-idx={idx}
-                className={[
-                  'fl-row',
-                  selection.has(entry.path) ? 'selected' : '',
-                  entry.hidden ? 'hidden-file' : '',
-                  clipboard?.mode === 'cut' && clipboard.paths.includes(entry.path) ? 'cut-pending' : '',
-                  dragOver === entry.path ? 'drag-over' : '',
-                ].join(' ')}
-                onClick={(e) => handleRowClick(e, entry, idx)}
-                onDoubleClick={() => openEntry(entry)}
-                onContextMenu={(e) => handleRowContext(e, entry)}
-                draggable={renaming !== entry.path}
-                onDragStart={(e) => handleDragStart(e, entry)}
-                {...(entry.isDir && !entry.name.endsWith('.app') ? {
-                  onDragOver: (e) => {
-                    if (!acceptsDrop(e)) return;
-                    e.preventDefault();
-                    e.stopPropagation();
-                    e.dataTransfer.dropEffect = e.altKey ? 'copy' : 'move';
-                    setDragOver(entry.path);
-                  },
-                  onDragLeave: () => setDragOver((v) => (v === entry.path ? null : v)),
-                  onDrop: (e) => handleDropOn(e, entry.path),
-                } : {})}
-              >
-                <div className="col col-name">
-                  <span className="fl-icon">{fileIcon(entry)}</span>
-                  {renaming === entry.path ? (
-                    <input
-                      className="rename-input"
-                      autoFocus
-                      value={renameValue}
-                      onChange={(e) => setRenameValue(e.target.value)}
-                      onFocus={(e) => {
-                        const dot = e.target.value.lastIndexOf('.');
-                        e.target.setSelectionRange(0, dot > 0 ? dot : e.target.value.length);
-                      }}
-                      onBlur={commitRename}
-                      onKeyDown={(e) => {
-                        e.stopPropagation();
-                        if (e.key === 'Enter') commitRename();
-                        if (e.key === 'Escape') setRenaming(null);
-                      }}
-                      onClick={(e) => e.stopPropagation()}
-                    />
-                  ) : (
-                    <span className="fl-name" title={deepSearch ? entry.path : entry.name}>{entry.name}</span>
+            {view === 'grid'
+              ? displayed.map((entry, idx) => (
+                <div key={entry.path} className={entryClass(entry, 'grid-item')} {...entryProps(entry, idx)}>
+                  <div className="gi-thumb">
+                    {isImage(entry) && entry.ext !== 'heic'
+                      ? <img src={localFileUrl(entry.path)} loading="lazy" alt="" draggable={false} />
+                      : <span className="gi-icon">{fileIcon(entry)}</span>}
+                  </div>
+                  {renaming === entry.path ? renameField : (
+                    <div className="gi-name" title={deepSearch ? entry.path : entry.name}>{entry.name}</div>
                   )}
                 </div>
-                <div className="col col-date">{formatDate(entry.mtime)}</div>
-                <div className="col col-kind">{fileKind(entry)}</div>
-                <div className="col col-size">{entry.isDir ? '—' : formatSize(entry.size) || '0 B'}</div>
-              </div>
-            ))}
+              ))
+              : displayed.map((entry, idx) => (
+                <div key={entry.path} className={entryClass(entry, 'fl-row')} {...entryProps(entry, idx)}>
+                  <div className="col col-name">
+                    <span className="fl-icon">{fileIcon(entry)}</span>
+                    {renaming === entry.path ? renameField : (
+                      <span className="fl-name" title={deepSearch ? entry.path : entry.name}>{entry.name}</span>
+                    )}
+                  </div>
+                  <div className="col col-date">{formatDate(entry.mtime)}</div>
+                  <div className="col col-kind">{fileKind(entry)}</div>
+                  <div className="col col-size">{entry.isDir ? '—' : formatSize(entry.size) || '0 B'}</div>
+                </div>
+              ))}
           </div>
         </div>
         {showPreview && <Preview entry={selectedEntries[0] || null} />}
