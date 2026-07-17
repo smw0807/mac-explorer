@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, shell, clipboard, protocol, net } = require('electron');
+const { app, BrowserWindow, ipcMain, shell, clipboard, protocol, net, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const fsp = require('fs/promises');
@@ -125,18 +125,54 @@ ipcMain.handle('fs:specialDirs', async () => {
   });
 });
 
-ipcMain.handle('fs:copy', async (_e, paths, destDir) => {
-  try {
-    for (const p of paths) {
-      const dest = path.dirname(p) === destDir
-        ? await uniqueDest(destDir, path.basename(p))
-        : path.join(destDir, path.basename(p));
-      if (fs.existsSync(dest) && path.dirname(p) !== destDir) {
-        throw new Error(`이미 존재합니다: ${path.basename(p)}`);
-      }
-      await fsp.cp(p, dest, { recursive: true, errorOnExist: true, force: false });
+// destDir에서 같은 이름이 이미 있는 항목 목록 (같은 폴더 내 복사는 자동으로 이름이 바뀌므로 제외)
+ipcMain.handle('fs:conflicts', async (_e, paths, destDir) => {
+  const names = paths
+    .filter((p) => path.dirname(p) !== destDir)
+    .map((p) => path.basename(p))
+    .filter((name) => fs.existsSync(path.join(destDir, name)));
+  return ok({ names });
+});
+
+ipcMain.handle('ui:confirmConflict', async (e, names) => {
+  const win = BrowserWindow.fromWebContents(e.sender);
+  const r = await dialog.showMessageBox(win, {
+    type: 'question',
+    buttons: ['둘 다 유지', '덮어쓰기', '건너뛰기', '취소'],
+    defaultId: 0,
+    cancelId: 3,
+    message: `대상 폴더에 같은 이름의 항목이 ${names.length}개 있습니다.`,
+    detail: names.slice(0, 8).join('\n') + (names.length > 8 ? `\n… 외 ${names.length - 8}개` : ''),
+  });
+  return ok({ choice: ['keepBoth', 'overwrite', 'skip', 'cancel'][r.response] });
+});
+
+// 충돌 정책 적용: 최종 dest 경로를 돌려주고, skip이면 null
+async function resolveDest(p, destDir, conflict) {
+  let dest = path.join(destDir, path.basename(p));
+  if (path.dirname(p) === destDir) return uniqueDest(destDir, path.basename(p));
+  if (fs.existsSync(dest)) {
+    if (conflict === 'skip') return null;
+    if (conflict === 'keepBoth') return uniqueDest(destDir, path.basename(p));
+    if (conflict === 'overwrite') {
+      await fsp.rm(dest, { recursive: true, force: true });
+      return dest;
     }
-    return ok({});
+    throw new Error(`이미 존재합니다: ${path.basename(p)}`);
+  }
+  return dest;
+}
+
+ipcMain.handle('fs:copy', async (_e, paths, destDir, opts = {}) => {
+  try {
+    const created = [];
+    for (const p of paths) {
+      const dest = await resolveDest(p, destDir, opts.conflict);
+      if (!dest) continue;
+      await fsp.cp(p, dest, { recursive: true, errorOnExist: true, force: false });
+      created.push(dest);
+    }
+    return ok({ created });
   } catch (err) { return fail(err); }
 });
 
@@ -193,7 +229,7 @@ async function copyTree(job, src, dest, report) {
   }
 }
 
-ipcMain.handle('fs:copyStart', (e, paths, destDir) => {
+ipcMain.handle('fs:copyStart', (e, paths, destDir, opts = {}) => {
   const jobId = ++copyJobSeq;
   const job = { canceled: false };
   copyJobs.set(jobId, job);
@@ -210,22 +246,21 @@ ipcMain.handle('fs:copyStart', (e, paths, destDir) => {
     };
     const timer = setInterval(() => send(), 100);
     let inFlightDest = null; // 복사가 끝나지 않은 항목만 취소/실패 시 정리
+    const created = [];
     try {
       for (const p of paths) report.total += await treeSize(p);
       send();
       for (const p of paths) {
         if (job.canceled) throw cancelError();
-        const sameDir = path.dirname(p) === destDir;
-        const dest = sameDir
-          ? await uniqueDest(destDir, path.basename(p))
-          : path.join(destDir, path.basename(p));
-        if (!sameDir && fs.existsSync(dest)) throw new Error(`이미 존재합니다: ${path.basename(p)}`);
+        const dest = await resolveDest(p, destDir, opts.conflict);
+        if (!dest) continue;
         inFlightDest = dest;
         await copyTree(job, p, dest, report);
+        created.push(dest);
         inFlightDest = null;
       }
       clearInterval(timer);
-      send({ done: true });
+      send({ done: true, created });
     } catch (err) {
       clearInterval(timer);
       if (inFlightDest) await fsp.rm(inFlightDest, { recursive: true, force: true }).catch(() => {});
@@ -244,12 +279,18 @@ ipcMain.handle('fs:copyCancel', (_e, jobId) => {
   return ok({});
 });
 
-ipcMain.handle('fs:move', async (_e, paths, destDir) => {
+ipcMain.handle('fs:move', async (_e, paths, destDir, opts = {}) => {
   try {
+    const items = [];
     for (const p of paths) {
-      const dest = path.join(destDir, path.basename(p));
-      if (p === dest) continue;
-      if (fs.existsSync(dest)) throw new Error(`이미 존재합니다: ${path.basename(p)}`);
+      if (path.dirname(p) === destDir) continue;
+      let dest = path.join(destDir, path.basename(p));
+      if (fs.existsSync(dest)) {
+        if (opts.conflict === 'skip') continue;
+        else if (opts.conflict === 'keepBoth') dest = await uniqueDest(destDir, path.basename(p));
+        else if (opts.conflict === 'overwrite') await fsp.rm(dest, { recursive: true, force: true });
+        else throw new Error(`이미 존재합니다: ${path.basename(p)}`);
+      }
       try {
         await fsp.rename(p, dest);
       } catch (err) {
@@ -258,8 +299,9 @@ ipcMain.handle('fs:move', async (_e, paths, destDir) => {
           await fsp.rm(p, { recursive: true });
         } else throw err;
       }
+      items.push({ from: p, to: dest });
     }
-    return ok({});
+    return ok({ items });
   } catch (err) { return fail(err); }
 });
 

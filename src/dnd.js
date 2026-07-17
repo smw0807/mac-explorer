@@ -26,6 +26,15 @@ export function extractDropPaths(e) {
   return [...e.dataTransfer.files].map((f) => window.api.pathForFile(f)).filter(Boolean);
 }
 
+// 충돌이 있으면 사용자에게 물어 정책을 결정. 취소면 null, 아니면 move/copy에 넘길 opts.
+export async function resolveConflictMode(paths, destDir) {
+  const res = await window.api.conflicts(paths, destDir);
+  if (!res.ok || res.names.length === 0) return {};
+  const c = await window.api.confirmConflict(res.names);
+  if (!c.ok || c.choice === 'cancel') return null;
+  return { conflict: c.choice };
+}
+
 // destDir로 드롭 처리. 기본은 이동, Alt(Option) 누르면 복사.
 export async function dropToDir(e, destDir) {
   const paths = extractDropPaths(e);
@@ -34,9 +43,11 @@ export async function dropToDir(e, destDir) {
   if (paths.some((p) => destDir === p || destDir.startsWith(p + '/'))) return;
   const copyMode = e.altKey;
   if (!copyMode && paths.every((p) => parentPath(p) === destDir)) return;
+  const opts = await resolveConflictMode(paths, destDir);
+  if (!opts) return;
   const res = copyMode
-    ? await window.api.copy(paths, destDir)
-    : await window.api.move(paths, destDir);
+    ? await window.api.copy(paths, destDir, opts)
+    : await window.api.move(paths, destDir, opts);
   if (!res.ok) alert(res.error);
   notifyFsChanged([...new Set([destDir, ...paths.map(parentPath)])]);
 }

@@ -3,8 +3,10 @@ const { contextBridge, ipcRenderer, webUtils } = require('electron');
 contextBridge.exposeInMainWorld('api', {
   readDir: (p) => ipcRenderer.invoke('fs:readDir', p),
   specialDirs: () => ipcRenderer.invoke('fs:specialDirs'),
-  copy: (paths, destDir) => ipcRenderer.invoke('fs:copy', paths, destDir),
-  move: (paths, destDir) => ipcRenderer.invoke('fs:move', paths, destDir),
+  copy: (paths, destDir, opts) => ipcRenderer.invoke('fs:copy', paths, destDir, opts),
+  move: (paths, destDir, opts) => ipcRenderer.invoke('fs:move', paths, destDir, opts),
+  conflicts: (paths, destDir) => ipcRenderer.invoke('fs:conflicts', paths, destDir),
+  confirmConflict: (names) => ipcRenderer.invoke('ui:confirmConflict', names),
   trash: (paths) => ipcRenderer.invoke('fs:trash', paths),
   rename: (p, newName) => ipcRenderer.invoke('fs:rename', p, newName),
   mkdir: (parent, name) => ipcRenderer.invoke('fs:mkdir', parent, name),
@@ -18,7 +20,7 @@ contextBridge.exposeInMainWorld('api', {
   copyTextToClipboard: (text) => ipcRenderer.invoke('clipboard:writeText', text),
   pathForFile: (file) => webUtils.getPathForFile(file),
   fileIcon: (p) => ipcRenderer.invoke('fs:fileIcon', p),
-  copyStart: (paths, destDir) => ipcRenderer.invoke('fs:copyStart', paths, destDir),
+  copyStart: (paths, destDir, opts) => ipcRenderer.invoke('fs:copyStart', paths, destDir, opts),
   copyCancel: (jobId) => ipcRenderer.invoke('fs:copyCancel', jobId),
   onCopyProgress: (cb) => {
     const listener = (_e, data) => cb(data);

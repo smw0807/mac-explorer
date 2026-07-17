@@ -5,7 +5,7 @@ import {
   basename, parentPath, formatSize, formatDate, fileIcon, fileKind,
   sortEntries, isImage, isTextLike, isVideo, isAudio, localFileUrl,
 } from '../util.js';
-import { acceptsDrop, startDrag, dropToDir, notifyFsChanged } from '../dnd.js';
+import { acceptsDrop, startDrag, dropToDir, notifyFsChanged, resolveConflictMode } from '../dnd.js';
 
 function Preview({ entry }) {
   const [text, setText] = useState(null);
@@ -140,13 +140,15 @@ export default function Pane({
 
   const doPaste = useCallback(async () => {
     if (!clipboard) return;
+    const opts = await resolveConflictMode(clipboard.paths, path);
+    if (!opts) return; // 사용자가 취소
     if (clipboard.mode === 'copy') {
-      const res = await window.api.copyStart(clipboard.paths, path);
+      const res = await window.api.copyStart(clipboard.paths, path, opts);
       if (!res.ok) { alert(res.error); return; }
       setCopyJob({ jobId: res.jobId, copied: 0, total: 0, currentFile: '' });
       return;
     }
-    const res = await window.api.move(clipboard.paths, path);
+    const res = await window.api.move(clipboard.paths, path, opts);
     if (!res.ok) alert(res.error);
     setClipboard(null);
     load();
