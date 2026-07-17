@@ -165,6 +165,7 @@ html, body, #root {
 .fl-row.selected { background: var(--bg-selected); color: #fff; }
 .fl-row.hidden-file { opacity: 0.5; }
 .fl-row.cut-pending { opacity: 0.45; }
+.sb-section.drag-over { color: var(--accent); }
 .fl-row.drag-over, .sb-item.drag-over, .tree-row.drag-over {
   outline: 1.5px solid var(--accent); outline-offset: -1.5px;
   background: var(--bg-selected-dim);

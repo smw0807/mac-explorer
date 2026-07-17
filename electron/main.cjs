@@ -380,6 +380,23 @@ ipcMain.handle('fs:exists', async (_e, p) => {
   }
 });
 
+/* ---------- settings (session/favorites persistence) ---------- */
+
+const settingsFile = () => path.join(app.getPath('userData'), 'settings.json');
+
+function readSettings() {
+  try { return JSON.parse(fs.readFileSync(settingsFile(), 'utf8')); } catch { return {}; }
+}
+
+ipcMain.handle('settings:get', () => ok({ settings: readSettings() }));
+
+ipcMain.handle('settings:set', (_e, patch) => {
+  try {
+    fs.writeFileSync(settingsFile(), JSON.stringify({ ...readSettings(), ...patch }, null, 2));
+    return ok({});
+  } catch (err) { return fail(err); }
+});
+
 /* ---------- directory watch (auto refresh) ---------- */
 
 // webContents id → (paneId → FSWatcher)

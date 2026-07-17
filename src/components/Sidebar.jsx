@@ -1,5 +1,6 @@
 import React, { useState, useCallback } from 'react';
-import { acceptsDrop, dropToDir } from '../dnd.js';
+import ContextMenu from './ContextMenu.jsx';
+import { acceptsDrop, dropToDir, extractDropPaths } from '../dnd.js';
 
 function dropTargetProps(destPath, dropTarget, setDropTarget) {
   return {
@@ -61,10 +62,11 @@ function TreeNode({ node, depth, expanded, childrenMap, onToggle, onNavigate, cu
   );
 }
 
-export default function Sidebar({ special, onNavigate, currentPath }) {
+export default function Sidebar({ special, onNavigate, currentPath, favorites, onAddFavorite, onRemoveFavorite }) {
   const [expanded, setExpanded] = useState(new Set());
   const [childrenMap, setChildrenMap] = useState({});
   const [dropTarget, setDropTarget] = useState(null);
+  const [menu, setMenu] = useState(null); // {x, y, items}
 
   const loadChildren = useCallback(async (p) => {
     const res = await window.api.readDir(p);
@@ -88,16 +90,7 @@ export default function Sidebar({ special, onNavigate, currentPath }) {
     });
   }, [childrenMap, loadChildren]);
 
-  if (!special) return <aside className="sidebar" />;
-
-  const favorites = [
-    { icon: '🏠', name: '홈', path: special.home },
-    { icon: '🖥️', name: '데스크탑', path: special.desktop },
-    { icon: '📄', name: '문서', path: special.documents },
-    { icon: '⬇️', name: '다운로드', path: special.downloads },
-    { icon: '🖼️', name: '사진', path: special.pictures },
-    { icon: '🅰️', name: '응용 프로그램', path: special.applications },
-  ];
+  if (!special || !favorites) return <aside className="sidebar" />;
 
   const roots = [
     { name: '홈', path: special.home },
@@ -109,12 +102,34 @@ export default function Sidebar({ special, onNavigate, currentPath }) {
 
   return (
     <aside className="sidebar">
-      <div className="sb-section">즐겨찾기</div>
+      <div
+        className={`sb-section ${dropTarget === '__favorites__' ? 'drag-over' : ''}`}
+        title="폴더를 끌어다 놓으면 즐겨찾기에 추가"
+        onDragOver={(e) => {
+          if (!acceptsDrop(e)) return;
+          e.preventDefault();
+          e.dataTransfer.dropEffect = 'copy';
+          setDropTarget('__favorites__');
+        }}
+        onDragLeave={() => setDropTarget((v) => (v === '__favorites__' ? null : v))}
+        onDrop={(e) => {
+          e.preventDefault();
+          setDropTarget(null);
+          extractDropPaths(e).forEach((p) => onAddFavorite(p));
+        }}
+      >즐겨찾기</div>
       {favorites.map((f) => (
         <div
           key={f.path}
           className={`sb-item ${currentPath === f.path ? 'current' : ''} ${dropTarget === f.path ? 'drag-over' : ''}`}
           onClick={() => onNavigate(f.path)}
+          onContextMenu={(e) => {
+            e.preventDefault();
+            setMenu({
+              x: e.clientX, y: e.clientY,
+              items: [{ label: '즐겨찾기에서 제거', onClick: () => onRemoveFavorite(f.path) }],
+            });
+          }}
           {...dropTargetProps(f.path, dropTarget, setDropTarget)}
         >
           <span className="sb-icon">{f.icon}</span>
@@ -138,6 +153,7 @@ export default function Sidebar({ special, onNavigate, currentPath }) {
           />
         ))}
       </div>
+      {menu && <ContextMenu x={menu.x} y={menu.y} items={menu.items} onClose={() => setMenu(null)} />}
     </aside>
   );
 }

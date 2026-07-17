@@ -20,6 +20,8 @@ contextBridge.exposeInMainWorld('api', {
   copyTextToClipboard: (text) => ipcRenderer.invoke('clipboard:writeText', text),
   pathForFile: (file) => webUtils.getPathForFile(file),
   fileIcon: (p) => ipcRenderer.invoke('fs:fileIcon', p),
+  settingsGet: () => ipcRenderer.invoke('settings:get'),
+  settingsSet: (patch) => ipcRenderer.invoke('settings:set', patch),
   copyStart: (paths, destDir, opts) => ipcRenderer.invoke('fs:copyStart', paths, destDir, opts),
   copyCancel: (jobId) => ipcRenderer.invoke('fs:copyCancel', jobId),
   onCopyProgress: (cb) => {
