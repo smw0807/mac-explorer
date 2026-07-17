@@ -1,4 +1,5 @@
 import { parentPath } from './util.js';
+import { recordOp } from './undo.js';
 
 export const DND_TYPE = 'application/x-mac-explorer-paths';
 
@@ -49,5 +50,7 @@ export async function dropToDir(e, destDir) {
     ? await window.api.copy(paths, destDir, opts)
     : await window.api.move(paths, destDir, opts);
   if (!res.ok) alert(res.error);
+  else if (copyMode && res.created?.length) recordOp({ type: 'copy', created: res.created });
+  else if (!copyMode && res.items?.length) recordOp({ type: 'move', items: res.items });
   notifyFsChanged([...new Set([destDir, ...paths.map(parentPath)])]);
 }

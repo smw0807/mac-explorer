@@ -6,6 +6,7 @@ import {
   sortEntries, isImage, isTextLike, isVideo, isAudio, localFileUrl,
 } from '../util.js';
 import { acceptsDrop, startDrag, dropToDir, notifyFsChanged, resolveConflictMode } from '../dnd.js';
+import { recordOp } from '../undo.js';
 
 function Preview({ entry }) {
   const [text, setText] = useState(null);
@@ -150,6 +151,7 @@ export default function Pane({
     }
     const res = await window.api.move(clipboard.paths, path, opts);
     if (!res.ok) alert(res.error);
+    else if (res.items?.length) recordOp({ type: 'move', items: res.items });
     setClipboard(null);
     load();
   }, [clipboard, path, setClipboard, load]);
@@ -162,6 +164,7 @@ export default function Pane({
       if (d.done) {
         setCopyJob(null);
         if (d.error) alert(d.error);
+        else if (!d.canceled && d.created?.length) recordOp({ type: 'copy', created: d.created });
         load();
       } else {
         setCopyJob((j) => (j && j.jobId === d.jobId
@@ -193,6 +196,7 @@ export default function Pane({
     if (renameValue && renameValue !== oldName) {
       const res = await window.api.rename(renaming, renameValue);
       if (!res.ok) alert(res.error);
+      else recordOp({ type: 'rename', from: renaming, to: res.path });
     }
     setRenaming(null);
     load();
@@ -201,6 +205,7 @@ export default function Pane({
   const newFolder = useCallback(async () => {
     const res = await window.api.mkdir(path, '새 폴더');
     if (res.ok) {
+      recordOp({ type: 'create', path: res.path });
       await load();
       setSelection(new Set([res.path]));
       setRenaming(res.path);
@@ -211,6 +216,7 @@ export default function Pane({
   const newFile = useCallback(async () => {
     const res = await window.api.newFile(path, '새 파일.txt');
     if (res.ok) {
+      recordOp({ type: 'create', path: res.path });
       await load();
       setSelection(new Set([res.path]));
       setRenaming(res.path);

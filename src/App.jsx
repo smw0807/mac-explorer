@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import Sidebar from './components/Sidebar.jsx';
 import Pane from './components/Pane.jsx';
 import { basename, nextId } from './util.js';
+import { undoLast } from './undo.js';
 
 function makePane(path) { return { id: nextId(), initialPath: path }; }
 function makeTab(path) { return { id: nextId(), dual: false, panes: [makePane(path)] }; }
@@ -84,6 +85,11 @@ export default function App() {
       // with Shift held, e.key is the shifted character ('D', '>') — compare case-insensitively / by code
       else if (e.shiftKey && e.key.toLowerCase() === 'd') { e.preventDefault(); toggleDual(); }
       else if (e.shiftKey && (e.key === '.' || e.code === 'Period')) { e.preventDefault(); setShowHidden((v) => !v); }
+      else if (e.key.toLowerCase() === 'z' && !e.shiftKey
+        && e.target.tagName !== 'INPUT' && e.target.tagName !== 'TEXTAREA') {
+        e.preventDefault();
+        undoLast();
+      }
     }
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
