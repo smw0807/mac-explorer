@@ -265,7 +265,7 @@ export default function Pane({
     if (meta && e.key === 'r') { e.preventDefault(); load(); return; }
     if (meta && e.key === 'l') { e.preventDefault(); setAddressValue(path); setAddressEdit(true); return; }
     if (meta && e.key === 'f') { e.preventDefault(); searchInputRef.current?.focus(); return; }
-    if (meta && e.shiftKey && e.key === 'n') { e.preventDefault(); newFolder(); return; }
+    if (meta && e.shiftKey && e.key.toLowerCase() === 'n') { e.preventDefault(); newFolder(); return; }
     if (meta && e.key === 'ArrowUp') { e.preventDefault(); if (path !== '/') navigate(parentPath(path)); return; }
     if (meta && e.key === 'ArrowDown') { e.preventDefault(); selectedEntries[0] && openEntry(selectedEntries[0]); return; }
     if (meta && e.key === 'Backspace') { e.preventDefault(); doTrash(); return; }

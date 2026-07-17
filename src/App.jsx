@@ -81,8 +81,9 @@ export default function App() {
       if (!meta) return;
       if (e.key === 't') { e.preventDefault(); addTab(panePaths[activePaneId] || special?.home || '/'); }
       else if (e.key === 'w') { e.preventDefault(); closeTab(activeTabId); }
-      else if (e.shiftKey && e.key === 'd') { e.preventDefault(); toggleDual(); }
-      else if (e.shiftKey && e.key === '.') { e.preventDefault(); setShowHidden((v) => !v); }
+      // with Shift held, e.key is the shifted character ('D', '>') — compare case-insensitively / by code
+      else if (e.shiftKey && e.key.toLowerCase() === 'd') { e.preventDefault(); toggleDual(); }
+      else if (e.shiftKey && (e.key === '.' || e.code === 'Period')) { e.preventDefault(); setShowHidden((v) => !v); }
     }
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
