@@ -227,6 +227,49 @@ ipcMain.handle('fs:exists', async (_e, p) => {
   }
 });
 
+/* ---------- directory watch (auto refresh) ---------- */
+
+// webContents id → (paneId → FSWatcher)
+const dirWatchers = new Map();
+
+function closeWatcher(wcId, paneId) {
+  const paneWatchers = dirWatchers.get(wcId);
+  const w = paneWatchers?.get(paneId);
+  if (w) {
+    clearTimeout(w.debounceTimer);
+    w.close();
+    paneWatchers.delete(paneId);
+  }
+}
+
+ipcMain.handle('fs:watch', (e, paneId, dirPath) => {
+  const wcId = e.sender.id;
+  if (!dirWatchers.has(wcId)) {
+    dirWatchers.set(wcId, new Map());
+    e.sender.once('destroyed', () => {
+      for (const [id] of dirWatchers.get(wcId)) closeWatcher(wcId, id);
+      dirWatchers.delete(wcId);
+    });
+  }
+  closeWatcher(wcId, paneId);
+  try {
+    const watcher = fs.watch(dirPath, () => {
+      // 연속 이벤트를 묶어서 한 번만 알림
+      clearTimeout(watcher.debounceTimer);
+      watcher.debounceTimer = setTimeout(() => {
+        if (!e.sender.isDestroyed()) e.sender.send('fs:dirChanged', { paneId, dir: dirPath });
+      }, 200);
+    });
+    dirWatchers.get(wcId).set(paneId, watcher);
+    return ok({});
+  } catch (err) { return fail(err); }
+});
+
+ipcMain.handle('fs:unwatch', (e, paneId) => {
+  closeWatcher(e.sender.id, paneId);
+  return ok({});
+});
+
 ipcMain.handle('clipboard:writeText', (_e, text) => {
   clipboard.writeText(text);
   return ok({});

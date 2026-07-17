@@ -96,6 +96,15 @@ export default function Pane({
     return () => window.removeEventListener('mx-fs-changed', onChanged);
   }, [path, load]);
 
+  // 현재 경로를 fs.watch로 감시해 외부 변경도 자동 반영
+  useEffect(() => {
+    window.api.watchDir(paneId, path);
+    const off = window.api.onDirChanged(({ paneId: id, dir }) => {
+      if (id === paneId && dir === path) load();
+    });
+    return () => { off(); window.api.unwatchDir(paneId); };
+  }, [paneId, path, load]);
+
   const displayed = useMemo(() => {
     let base = deepSearch ? deepSearch.results : entries;
     if (!showHidden) base = base.filter((e) => !e.hidden);
