@@ -214,3 +214,24 @@ test('drag-and-drop move records successful items but excludes recovery copies f
   assert.deepEqual(restored, ['/dest/a']);
   assert.equal(await history.undoLast(), null);
 });
+
+test('internal drag payloads reject malformed and non-absolute paths before any file operation', async () => {
+  const history = loadHistory({ conflicts: () => assert.fail('invalid payloads must not reach the filesystem API') });
+  const malformed = [
+    '{', 'null', 'false', '17', '{}', '"/test/file"',
+    '["/test/valid", null]', '["/test/valid", 42]', '["/test/valid", {}]',
+    '["relative/file"]', '[""]', '["/test/bad\\u0000name"]',
+  ];
+  for (const raw of malformed) {
+    const event = { altKey: false, dataTransfer: { getData: () => raw } };
+    assert.deepEqual(history.extractDropPaths(event), [], raw);
+    await history.dropToDir(event, '/destination');
+  }
+});
+
+test('internal drag payloads preserve valid absolute filenames including spaces and newlines', () => {
+  const history = loadHistory();
+  const paths = ['/test/space name', '/test/line\nbreak', '/test/-dash', '/test/한글'];
+  assert.deepEqual(history.extractDropPaths(dropEvent(paths)), paths);
+  assert.deepEqual(history.extractDropPaths(dropEvent([])), []);
+});

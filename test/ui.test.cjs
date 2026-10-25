@@ -587,3 +587,95 @@ for (const kind of ['folder', 'file']) {
     assert.equal(ui.query('.rename-input')?.value, created.name);
   });
 }
+
+test('restoring an empty favorites list does not repopulate default favorites', async (t) => {
+  const ui = await mountApp({ api: { settingsGet: async () => ({ settings: { favorites: [] } }) } });
+  t.after(() => ui.unmount());
+  assert.equal(ui.queryAll('.sb-item').length, 0);
+  assert.ok(ui.query('.sb-tree'));
+  assert.ok(visiblePane(ui));
+});
+
+test('watch registration failure preserves the listing and the refresh button retries automatic refresh', async (t) => {
+  let watches = 0;
+  let reads = 0;
+  const ui = await mountPane({
+    api: {
+      readDir: async () => { reads += 1; return { ok: true, entries: [file('visible.txt')] }; },
+      watchDir: async () => ++watches === 1 ? { ok: false, error: 'watch permission denied' } : { ok: true },
+    },
+  });
+  t.after(() => ui.unmount());
+  assert.deepEqual(displayedNames(ui), ['visible.txt']);
+  assert.match(ui.query('.watch-status').textContent, /자동 새로고침 중지: watch permission denied/);
+  await click(ui.query('[title="새로 고침"]'));
+  assert.equal(watches, 2);
+  assert.equal(reads, 2);
+  assert.equal(ui.query('.watch-status'), null);
+});
+
+test('runtime watcher errors are shown and Command-R reconnects the watcher', async (t) => {
+  let watches = 0;
+  let reads = 0;
+  const ui = await mountPane({
+    api: {
+      readDir: async () => { reads += 1; return { ok: true, entries: [file('visible.txt')] }; },
+      watchDir: async () => { watches += 1; return { ok: true }; },
+    },
+  });
+  t.after(() => ui.unmount());
+  await ui.emitDirectory({ paneId: 'test-pane', dir: '/test', error: 'device disconnected' });
+  assert.equal(reads, 1, 'an error event is not treated as a successful directory change');
+  assert.match(ui.query('.watch-status').textContent, /device disconnected/);
+  assert.deepEqual(displayedNames(ui), ['visible.txt']);
+  await key(ui.query('.pane'), 'r', { metaKey: true });
+  assert.equal(watches, 2);
+  assert.equal(ui.query('.watch-status'), null);
+  await ui.emitDirectory({ paneId: 'test-pane', dir: '/test' });
+  assert.equal(reads, 3);
+});
+
+test('a late watcher response or error for the previous directory cannot replace current watch state', async (t) => {
+  const oldWatch = deferred();
+  const watched = [];
+  const ui = await mountPane({
+    api: {
+      watchDir: (paneId, directory) => {
+        watched.push(directory);
+        return directory === '/test' ? oldWatch.promise : Promise.resolve({ ok: true });
+      },
+    },
+  });
+  t.after(() => ui.unmount());
+  await click(ui.query('.bc-seg'));
+  await flush(() => oldWatch.resolve({ ok: false, error: 'old watch failed' }));
+  await ui.emitDirectory({ paneId: 'test-pane', dir: '/test', error: 'old directory disappeared' });
+  assert.deepEqual(watched, ['/test', '/']);
+  assert.equal(ui.query('.watch-status'), null);
+});
+
+test('a watcher error cannot be cleared by a late successful startup response', async (t) => {
+  const startup = deferred();
+  let watches = 0;
+  const ui = await mountPane({ api: { watchDir: () => ++watches === 1 ? startup.promise : Promise.resolve({ ok: true }) } });
+  t.after(() => ui.unmount());
+  await ui.emitDirectory({ paneId: 'test-pane', dir: '/test', error: 'watch stopped immediately' });
+  await flush(() => startup.resolve({ ok: true }));
+  assert.match(ui.query('.watch-status').textContent, /watch stopped immediately/);
+  await click(ui.query('.watch-status button'));
+  assert.equal(watches, 2);
+  assert.equal(ui.query('.watch-status'), null);
+});
+
+test('watch IPC rejection is recoverable and late failures after unmount are handled', async () => {
+  const late = deferred();
+  let watches = 0;
+  const ui = await mountPane({
+    api: { watchDir: () => ++watches === 1 ? Promise.reject(new Error('watch IPC unavailable')) : late.promise },
+  });
+  assert.match(ui.query('.watch-status').textContent, /watch IPC unavailable/);
+  await click(ui.query('.watch-status button'));
+  await ui.unmount();
+  await flush(() => late.reject(new Error('late IPC failure')));
+  assert.equal(ui.container.isConnected, false);
+});

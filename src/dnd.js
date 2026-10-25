@@ -21,7 +21,11 @@ export function startDrag(e, paths) {
 export function extractDropPaths(e) {
   const raw = e.dataTransfer.getData(DND_TYPE);
   if (raw) {
-    try { return JSON.parse(raw); } catch { return []; }
+    try {
+      const paths = JSON.parse(raw);
+      return Array.isArray(paths) && paths.every((p) => typeof p === 'string' && p.startsWith('/') && !p.includes('\0'))
+        ? paths : [];
+    } catch { return []; }
   }
   // Finder 등 외부에서 드롭된 파일
   return [...e.dataTransfer.files].map((f) => window.api.pathForFile(f)).filter(Boolean);

@@ -9,15 +9,18 @@ const { promisify } = require('util');
 const execFileP = promisify(execFile);
 const { statEntry, uniqueDest, copyItem, moveItem, treeSize, cancelError, validateBatch } = require('./file-operations.cjs');
 const { compress } = require('./archive.cjs');
+const { absolutePath, validateArguments, validateSender } = require('./ipc-validation.cjs');
+const { readSettings, writeSettings } = require('./settings.cjs');
 
 // custom protocol for previewing local files (images/video) in the renderer
 protocol.registerSchemesAsPrivileged([
-  { scheme: 'localfile', privileges: { stream: true, bypassCSP: true, supportFetchAPI: true } },
+  { scheme: 'localfile', privileges: { stream: true, supportFetchAPI: true } },
 ]);
 
 // `electron .` runs unpackaged even for production builds (npm start),
 // so dev mode requires the dev script to opt in via VITE_DEV=1
 const isDev = !app.isPackaged && process.env.VITE_DEV === '1';
+const appURL = isDev ? 'http://localhost:5173/' : pathToFileURL(path.join(__dirname, '../dist/index.html')).href;
 
 function createWindow() {
   const win = new BrowserWindow({
@@ -32,20 +35,36 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
+      sandbox: true,
+      navigateOnDragDrop: false,
+      webviewTag: false,
     },
   });
 
+  win.webContents.on('will-navigate', (event) => event.preventDefault());
+  win.webContents.on('will-frame-navigate', (event) => event.preventDefault());
+  win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+
   if (isDev) {
-    win.loadURL('http://localhost:5173');
+    win.loadURL(appURL);
   } else {
     win.loadFile(path.join(__dirname, '../dist/index.html'));
   }
 }
 
 app.whenReady().then(() => {
-  protocol.handle('localfile', (request) => {
-    const p = decodeURIComponent(request.url.slice('localfile://'.length));
-    return net.fetch(pathToFileURL(p).toString());
+  protocol.handle('localfile', async (request) => {
+    try {
+      if (request.method !== 'GET' && request.method !== 'HEAD') return new Response(null, { status: 405 });
+      if (!request.url.startsWith('localfile://')) return new Response(null, { status: 400 });
+      const p = decodeURIComponent(request.url.slice('localfile://'.length));
+      absolutePath(p);
+      // Forward media range requests without copying arbitrary request headers.
+      const headers = new Headers();
+      const range = request.headers.get('range');
+      if (range) headers.set('range', range);
+      return await net.fetch(pathToFileURL(p).href, { method: request.method, headers });
+    } catch { return new Response(null, { status: 400 }); }
   });
   createWindow();
   app.on('activate', () => {
@@ -90,9 +109,20 @@ async function entryInfo(dirPath, name) {
 function ok(data) { return { ok: true, ...data }; }
 function fail(err) { return { ok: false, error: err.message || String(err) }; }
 
+function handle(channel, callback) {
+  ipcMain.handle(channel, (event, ...args) => {
+    try {
+      validateSender(event, appURL);
+      validateArguments(channel, args);
+      const result = callback(event, ...args);
+      return result && typeof result.catch === 'function' ? result.catch(fail) : result;
+    } catch (err) { return fail(err); }
+  });
+}
+
 /* ---------- IPC ---------- */
 
-ipcMain.handle('fs:readDir', async (_e, dirPath) => {
+handle('fs:readDir', async (_e, dirPath) => {
   try {
     const names = await fsp.readdir(dirPath);
     const entries = (await Promise.all(names.map((n) => entryInfo(dirPath, n)))).filter(Boolean);
@@ -100,7 +130,7 @@ ipcMain.handle('fs:readDir', async (_e, dirPath) => {
   } catch (err) { return fail(err); }
 });
 
-ipcMain.handle('fs:specialDirs', async () => {
+handle('fs:specialDirs', async () => {
   const home = os.homedir();
   let volumes = [];
   try {
@@ -119,7 +149,7 @@ ipcMain.handle('fs:specialDirs', async () => {
 });
 
 // destDir에서 같은 이름이 이미 있는 항목 목록 (같은 폴더 내 복사는 자동으로 이름이 바뀌므로 제외)
-ipcMain.handle('fs:conflicts', async (_e, paths, destDir) => {
+handle('fs:conflicts', async (_e, paths, destDir) => {
   try {
     const names = [];
     for (const p of paths) {
@@ -130,7 +160,7 @@ ipcMain.handle('fs:conflicts', async (_e, paths, destDir) => {
   } catch (err) { return fail(err); }
 });
 
-ipcMain.handle('ui:confirmConflict', async (e, names) => {
+handle('ui:confirmConflict', async (e, names) => {
   const win = BrowserWindow.fromWebContents(e.sender);
   const r = await dialog.showMessageBox(win, {
     type: 'question',
@@ -143,7 +173,7 @@ ipcMain.handle('ui:confirmConflict', async (e, names) => {
   return ok({ choice: ['keepBoth', 'overwrite', 'skip', 'cancel'][r.response] });
 });
 
-ipcMain.handle('fs:copy', async (_e, paths, destDir, opts = {}) => {
+handle('fs:copy', async (_e, paths, destDir, opts = {}) => {
   const created = [];
   try {
     await validateBatch(paths, destDir, opts);
@@ -160,9 +190,9 @@ ipcMain.handle('fs:copy', async (_e, paths, destDir, opts = {}) => {
 let copyJobSeq = 0;
 const copyJobs = new Map(); // jobId → { canceled }
 
-ipcMain.handle('fs:copyStart', (e, paths, destDir, opts = {}) => {
+handle('fs:copyStart', (e, paths, destDir, opts = {}) => {
   const jobId = ++copyJobSeq;
-  const job = { canceled: false, controller: new AbortController() };
+  const job = { canceled: false, controller: new AbortController(), senderId: e.sender.id };
   copyJobs.set(jobId, job);
   const sender = e.sender;
   const onDestroyed = () => { job.canceled = true; job.controller.abort(); };
@@ -202,13 +232,14 @@ ipcMain.handle('fs:copyStart', (e, paths, destDir, opts = {}) => {
   return ok({ jobId });
 });
 
-ipcMain.handle('fs:copyCancel', (_e, jobId) => {
+handle('fs:copyCancel', (e, jobId) => {
   const job = copyJobs.get(jobId);
+  if (job && job.senderId !== e.sender.id) return fail(new Error('다른 창의 복사 작업입니다.'));
   if (job) { job.canceled = true; job.controller.abort(); }
   return ok({});
 });
 
-ipcMain.handle('fs:move', async (_e, paths, destDir, opts = {}) => {
+handle('fs:move', async (_e, paths, destDir, opts = {}) => {
   const items = [];
   const recovery = [];
   try {
@@ -226,7 +257,7 @@ ipcMain.handle('fs:move', async (_e, paths, destDir, opts = {}) => {
   } catch (err) { return { ...fail(err), items, recovery }; }
 });
 
-ipcMain.handle('fs:trash', async (_e, paths) => {
+handle('fs:trash', async (_e, paths) => {
   const trashed = [];
   try {
     for (const p of paths) {
@@ -237,14 +268,14 @@ ipcMain.handle('fs:trash', async (_e, paths) => {
   } catch (err) { return { ...fail(err), trashed }; }
 });
 
-ipcMain.handle('fs:rename', async (_e, p, newName) => {
+handle('fs:rename', async (_e, p, newName) => {
   try {
     const dest = await moveItem(p, path.dirname(p), { name: newName });
     return ok({ path: dest || p });
   } catch (err) { return fail(err); }
 });
 
-ipcMain.handle('fs:mkdir', async (_e, parent, name) => {
+handle('fs:mkdir', async (_e, parent, name) => {
   try {
     const dest = await uniqueDest(parent, name || '새 폴더');
     await fsp.mkdir(dest);
@@ -252,7 +283,7 @@ ipcMain.handle('fs:mkdir', async (_e, parent, name) => {
   } catch (err) { return fail(err); }
 });
 
-ipcMain.handle('fs:newFile', async (_e, parent, name) => {
+handle('fs:newFile', async (_e, parent, name) => {
   try {
     const dest = await uniqueDest(parent, name || '새 파일.txt');
     await fsp.writeFile(dest, '', { flag: 'wx' });
@@ -260,20 +291,20 @@ ipcMain.handle('fs:newFile', async (_e, parent, name) => {
   } catch (err) { return fail(err); }
 });
 
-ipcMain.handle('fs:fileIcon', async (_e, p) => {
+handle('fs:fileIcon', async (_e, p) => {
   try {
     const img = await app.getFileIcon(p, { size: 'normal' });
     return ok({ dataUrl: img.toDataURL() });
   } catch (err) { return fail(err); }
 });
 
-ipcMain.handle('fs:open', async (_e, p) => {
+handle('fs:open', async (_e, p) => {
   const err = await shell.openPath(p);
   return err ? fail(new Error(err)) : ok({});
 });
 
 // '다음으로 열기': 앱 선택 후 open -a로 실행
-ipcMain.handle('ui:pickApp', async (e) => {
+handle('ui:pickApp', async (e) => {
   const win = BrowserWindow.fromWebContents(e.sender);
   const r = await dialog.showOpenDialog(win, {
     title: '연결할 앱 선택',
@@ -284,7 +315,7 @@ ipcMain.handle('ui:pickApp', async (e) => {
   return ok({ path: r.canceled || !r.filePaths.length ? null : r.filePaths[0] });
 });
 
-ipcMain.handle('fs:openWithApp', async (_e, filePath, appPath) => {
+handle('fs:openWithApp', async (_e, filePath, appPath) => {
   try {
     await execFileP('open', ['-a', appPath, filePath]);
     return ok({});
@@ -292,7 +323,7 @@ ipcMain.handle('fs:openWithApp', async (_e, filePath, appPath) => {
 });
 
 // macOS Quick Look 미리보기 (qlmanage)
-ipcMain.handle('fs:quickLook', (_e, p) => {
+handle('fs:quickLook', (_e, p) => {
   try {
     const child = require('child_process').spawn('qlmanage', ['-p', p], { detached: true, stdio: 'ignore' });
     child.unref();
@@ -300,12 +331,12 @@ ipcMain.handle('fs:quickLook', (_e, p) => {
   } catch (err) { return fail(err); }
 });
 
-ipcMain.handle('fs:reveal', async (_e, p) => {
+handle('fs:reveal', async (_e, p) => {
   shell.showItemInFolder(p);
   return ok({});
 });
 
-ipcMain.handle('fs:readText', async (_e, p, maxBytes = 200 * 1024) => {
+handle('fs:readText', async (_e, p, maxBytes = 200 * 1024) => {
   let fh;
   try {
     fh = await fsp.open(p, 'r');
@@ -316,17 +347,21 @@ ipcMain.handle('fs:readText', async (_e, p, maxBytes = 200 * 1024) => {
   finally { await fh?.close().catch(() => {}); }
 });
 
-ipcMain.handle('fs:statfs', async (_e, p) => {
+handle('fs:statfs', async (_e, p) => {
   try {
     const s = await fsp.statfs(p);
     return ok({ free: s.bavail * s.bsize, total: s.blocks * s.bsize });
   } catch (err) { return fail(err); }
 });
 
-ipcMain.handle('fs:exists', async (_e, p) => {
+handle('fs:exists', async (_e, p) => {
   try {
-    const st = await fsp.stat(p);
-    return ok({ exists: true, isDir: st.isDirectory() });
+    const st = await fsp.lstat(p);
+    let isDir = st.isDirectory();
+    if (st.isSymbolicLink()) {
+      try { isDir = (await fsp.stat(p)).isDirectory(); } catch { /* dangling links still exist */ }
+    }
+    return ok({ exists: true, isDir });
   } catch {
     return ok({ exists: false, isDir: false });
   }
@@ -335,13 +370,13 @@ ipcMain.handle('fs:exists', async (_e, p) => {
 /* ---------- zip (compress / extract) ---------- */
 
 // 선택 항목들을 같은 폴더에 zip으로 압축 (Finder처럼 단일 항목은 그 이름, 여러 개면 '보관')
-ipcMain.handle('fs:compress', async (_e, paths) => {
+handle('fs:compress', async (_e, paths) => {
   try {
     return ok({ path: await compress(paths) });
   } catch (err) { return fail(err); }
 });
 
-ipcMain.handle('fs:extract', async (_e, zipPath) => {
+handle('fs:extract', async (_e, zipPath) => {
   try {
     const dest = await uniqueDest(path.dirname(zipPath), path.basename(zipPath).replace(/\.zip$/i, ''));
     await execFileP('/usr/bin/ditto', ['-x', '-k', zipPath, dest]);
@@ -353,15 +388,11 @@ ipcMain.handle('fs:extract', async (_e, zipPath) => {
 
 const settingsFile = () => path.join(app.getPath('userData'), 'settings.json');
 
-function readSettings() {
-  try { return JSON.parse(fs.readFileSync(settingsFile(), 'utf8')); } catch { return {}; }
-}
+handle('settings:get', () => ok({ settings: readSettings(settingsFile()) }));
 
-ipcMain.handle('settings:get', () => ok({ settings: readSettings() }));
-
-ipcMain.handle('settings:set', (_e, patch) => {
+handle('settings:set', (_e, patch) => {
   try {
-    fs.writeFileSync(settingsFile(), JSON.stringify({ ...readSettings(), ...patch }, null, 2));
+    writeSettings(settingsFile(), patch);
     return ok({});
   } catch (err) { return fail(err); }
 });
@@ -376,46 +407,54 @@ function closeWatcher(wcId, paneId) {
   const w = paneWatchers?.get(paneId);
   if (w) {
     clearTimeout(w.debounceTimer);
-    w.close();
     paneWatchers.delete(paneId);
+    w.close();
   }
 }
 
-ipcMain.handle('fs:watch', (e, paneId, dirPath) => {
+handle('fs:watch', (e, paneId, dirPath) => {
   const wcId = e.sender.id;
   if (!dirWatchers.has(wcId)) {
     dirWatchers.set(wcId, new Map());
     e.sender.once('destroyed', () => {
-      for (const [id] of dirWatchers.get(wcId)) closeWatcher(wcId, id);
+      for (const [id] of dirWatchers.get(wcId) || []) closeWatcher(wcId, id);
       dirWatchers.delete(wcId);
     });
   }
   closeWatcher(wcId, paneId);
   try {
     const watcher = fs.watch(dirPath, () => {
+      if (dirWatchers.get(wcId)?.get(paneId) !== watcher) return;
       // 연속 이벤트를 묶어서 한 번만 알림
       clearTimeout(watcher.debounceTimer);
       watcher.debounceTimer = setTimeout(() => {
-        if (!e.sender.isDestroyed()) e.sender.send('fs:dirChanged', { paneId, dir: dirPath });
+        if (dirWatchers.get(wcId)?.get(paneId) === watcher && !e.sender.isDestroyed()) {
+          e.sender.send('fs:dirChanged', { paneId, dir: dirPath });
+        }
       }, 200);
+    });
+    watcher.on('error', (err) => {
+      if (dirWatchers.get(wcId)?.get(paneId) !== watcher) return;
+      closeWatcher(wcId, paneId);
+      if (!e.sender.isDestroyed()) e.sender.send('fs:dirChanged', { paneId, dir: dirPath, error: err.message || String(err) });
     });
     dirWatchers.get(wcId).set(paneId, watcher);
     return ok({});
   } catch (err) { return fail(err); }
 });
 
-ipcMain.handle('fs:unwatch', (e, paneId) => {
+handle('fs:unwatch', (e, paneId) => {
   closeWatcher(e.sender.id, paneId);
   return ok({});
 });
 
-ipcMain.handle('clipboard:writeText', (_e, text) => {
-  clipboard.writeText(text);
+handle('clipboard:writeText', async (_e, text) => {
+  await clipboard.writeText(text);
   return ok({});
 });
 
 // Spotlight(mdfind) 검색: 파일 이름 + 내용, 인덱스 기반이라 즉시 응답
-ipcMain.handle('fs:searchSpotlight', async (_e, rootPath, query, opts = {}) => {
+handle('fs:searchSpotlight', async (_e, rootPath, query, opts = {}) => {
   try {
     const q = query.replace(/["\\]/g, '');
     const { stdout } = await execFileP('mdfind',
@@ -438,7 +477,7 @@ function hiddenWithin(root, p) {
   return path.relative(root, p).split(path.sep).some((part) => part.startsWith('.') && part !== '..');
 }
 
-ipcMain.handle('fs:search', async (_e, rootPath, query, opts = {}) => {
+handle('fs:search', async (_e, rootPath, query, opts = {}) => {
   const maxResults = Math.max(1, Math.min(5000, opts.maxResults ?? 500));
   const maxDepth = Math.max(0, Math.min(64, opts.maxDepth ?? 8));
   const q = query.toLowerCase();

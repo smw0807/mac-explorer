@@ -36,7 +36,7 @@ export default function App() {
     (async () => {
       const res = await window.api.specialDirs();
       const st = (await window.api.settingsGet()).settings || {};
-      setFavorites(Array.isArray(st.favorites) && st.favorites.length ? st.favorites : defaultFavorites(res));
+      setFavorites(Array.isArray(st.favorites) ? st.favorites : defaultFavorites(res));
 
       // 이전 세션 탭 복원 (존재하는 경로만)
       let restored = [];

@@ -62,6 +62,7 @@ export default function Pane({
   const path = hist.stack[hist.idx];
   const [entries, setEntries] = useState([]);
   const [error, setError] = useState(null);
+  const [watchError, setWatchError] = useState(null);
   const [selection, setSelection] = useState(() => new Set());
   const anchorRef = useRef(-1);
   const [sort, setSort] = useState({ key: 'name', dir: 'asc' });
@@ -85,6 +86,7 @@ export default function Pane({
   const currentPathRef = useRef(initialPath);
   const loadGeneration = useRef(0);
   const searchGeneration = useRef(0);
+  const watchGeneration = useRef(0);
   const currentSearch = useRef(null);
   const showHiddenRef = useRef(showHidden);
   showHiddenRef.current = showHidden;
@@ -95,6 +97,7 @@ export default function Pane({
       mountedRef.current = false;
       loadGeneration.current += 1;
       searchGeneration.current += 1;
+      watchGeneration.current += 1;
     };
   }, []);
 
@@ -110,8 +113,10 @@ export default function Pane({
       // Invalidate synchronously, before React commits the new path/effects.
       currentPathRef.current = nextPath;
       loadGeneration.current += 1;
+      watchGeneration.current += 1;
       setEntries([]);
       setError(null);
+      setWatchError(null);
       setDisk(null);
     }
     clearSearch();
@@ -178,14 +183,40 @@ export default function Pane({
     return () => window.removeEventListener('mx-fs-changed', onChanged);
   }, [path, load]);
 
-  // 현재 경로를 fs.watch로 감시해 외부 변경도 자동 반영
+  const startWatching = useCallback(async () => {
+    if (!mountedRef.current || path !== currentPathRef.current) return;
+    const generation = ++watchGeneration.current;
+    let result;
+    try {
+      result = await window.api.watchDir(paneId, path);
+    } catch (error) {
+      result = { ok: false, error: error.message || String(error) };
+    }
+    if (!mountedRef.current || generation !== watchGeneration.current || path !== currentPathRef.current) return;
+    setWatchError(result.ok ? null : result.error || '폴더를 감시할 수 없습니다.');
+  }, [paneId, path]);
+
+  // Subscribe before starting the watcher so an immediate failure is not missed.
   useEffect(() => {
-    window.api.watchDir(paneId, path);
-    const off = window.api.onDirChanged(({ paneId: id, dir }) => {
-      if (id === paneId && dir === path) load();
+    const off = window.api.onDirChanged(({ paneId: id, dir, error }) => {
+      if (!mountedRef.current || id !== paneId || dir !== path || path !== currentPathRef.current) return;
+      if (error != null) {
+        watchGeneration.current += 1;
+        setWatchError(error || '폴더 감시가 중단되었습니다.');
+      } else load();
     });
-    return () => { off(); window.api.unwatchDir(paneId); };
-  }, [paneId, path, load]);
+    startWatching();
+    return () => {
+      watchGeneration.current += 1;
+      off();
+      window.api.unwatchDir(paneId);
+    };
+  }, [paneId, path, load, startWatching]);
+
+  const refresh = useCallback(() => {
+    load();
+    if (watchError) startWatching();
+  }, [load, watchError, startWatching]);
 
   const displayed = useMemo(() => {
     let base = deepSearch ? deepSearch.results : entries;
@@ -450,10 +481,10 @@ export default function Pane({
         { label: '붙여넣기', shortcut: '⌘V', disabled: !clipboard, onClick: doPaste },
         { separator: true },
         { label: '현재 경로 복사', onClick: () => window.api.copyTextToClipboard(path) },
-        { label: '새로 고침', shortcut: '⌘R', onClick: load },
+        { label: '새로 고침', shortcut: '⌘R', onClick: refresh },
       ],
     });
-  }, [clipboard, doPaste, newFolder, newFile, path, load, onActivate]);
+  }, [clipboard, doPaste, newFolder, newFile, path, refresh, onActivate]);
 
   /* ---------- keyboard ---------- */
 
@@ -467,7 +498,7 @@ export default function Pane({
     if (meta && e.key === 'c') { e.preventDefault(); doCopy(); return; }
     if (meta && e.key === 'x') { e.preventDefault(); doCut(); return; }
     if (meta && e.key === 'v') { e.preventDefault(); doPaste(); return; }
-    if (meta && e.key === 'r') { e.preventDefault(); load(); return; }
+    if (meta && e.key === 'r') { e.preventDefault(); refresh(); return; }
     if (meta && e.key === 'l') { e.preventDefault(); setAddressValue(path); setAddressEdit(true); return; }
     if (meta && e.key === 'f') { e.preventDefault(); searchInputRef.current?.focus(); return; }
     if (meta && e.key === 'y') { e.preventDefault(); selectedEntries[0] && window.api.quickLook(selectedEntries[0].path); return; }
@@ -518,7 +549,7 @@ export default function Pane({
       anchorRef.current = next;
       rootRef.current?.querySelector(`[data-idx="${next}"]`)?.scrollIntoView({ block: 'nearest' });
     }
-  }, [displayed, selection, selectedEntries, doCopy, doCut, doPaste, doTrash, startRename, openEntry, navigate, path, load, newFolder, view, clearSearch]);
+  }, [displayed, selection, selectedEntries, doCopy, doCut, doPaste, doTrash, startRename, openEntry, navigate, path, refresh, newFolder, view, clearSearch]);
 
   /* ---------- render ---------- */
 
@@ -605,7 +636,7 @@ export default function Pane({
           title="앞으로">▶</button>
         <button className="tb-btn" disabled={path === '/'}
           onClick={() => navigate(parentPath(path))} title="상위 폴더">▲</button>
-        <button className="tb-btn" onClick={load} title="새로 고침">⟳</button>
+        <button className="tb-btn" onClick={refresh} title="새로 고침">⟳</button>
 
         {addressEdit ? (
           <input
@@ -666,6 +697,13 @@ export default function Pane({
           title="미리보기 (Space)"
         >👁</button>
       </div>
+
+      {watchError && (
+        <div className="search-banner watch-status" role="status">
+          자동 새로고침 중지: {watchError}
+          <button onClick={refresh}>재시도</button>
+        </div>
+      )}
 
       {deepSearch && (
         <div className="search-banner">
