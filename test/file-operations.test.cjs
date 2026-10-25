@@ -353,3 +353,93 @@ test('EXDEV source cleanup failure preserves the fully committed destination', a
   await assertText(dest, 'new contents');
   await assertNoWorkspace(destDir);
 });
+
+for (const mode of [0o700, 0o600]) {
+  test(`copy preserves file permissions ${mode.toString(8)}`, async (t) => {
+    const { sourceDir, destDir } = await fixture(t);
+    const source = path.join(sourceDir, mode === 0o700 ? 'launch.sh' : 'private.txt');
+    await fsp.writeFile(source, mode === 0o700 ? '#!/bin/sh\nexit 0\n' : 'private contents');
+    await fsp.chmod(source, mode);
+    const dest = await operations.copyItem(source, destDir);
+    assert.equal((await fsp.stat(source)).mode & 0o7777, mode);
+    assert.equal((await fsp.stat(dest)).mode & 0o7777, mode);
+    await assertNoWorkspace(destDir);
+  });
+}
+
+test('copy preserves private directory permissions after copying its children', async (t) => {
+  const { sourceDir, destDir } = await fixture(t);
+  const source = path.join(sourceDir, 'private');
+  const child = path.join(source, 'nested');
+  await fsp.mkdir(child, { recursive: true });
+  await fsp.writeFile(path.join(child, 'item'), 'contents');
+  await fsp.chmod(source, 0o700);
+  await fsp.chmod(child, 0o700);
+  const dest = await operations.copyItem(source, destDir);
+  assert.equal((await fsp.stat(dest)).mode & 0o7777, 0o700);
+  assert.equal((await fsp.stat(path.join(dest, 'nested'))).mode & 0o7777, 0o700);
+  await assertText(path.join(dest, 'nested', 'item'), 'contents');
+});
+
+test('copy preserves file and directory access and modification times', async (t) => {
+  const { sourceDir, destDir } = await fixture(t);
+  const source = path.join(sourceDir, 'folder');
+  const file = path.join(source, 'item');
+  await fsp.mkdir(source);
+  await fsp.writeFile(file, 'contents');
+  await fsp.utimes(file, new Date('2003-02-01T01:02:03Z'), new Date('2004-03-02T04:05:06Z'));
+  await fsp.utimes(source, new Date('2005-04-03T07:08:09Z'), new Date('2006-05-04T10:11:12Z'));
+  const expectedFile = await fsp.stat(file);
+  const expectedDirectory = await fsp.stat(source);
+  const dest = await operations.copyItem(source, destDir);
+  // Inspect timestamps before reads or directory listings can change destination atime.
+  const actualDirectory = await fsp.stat(dest);
+  const actualFile = await fsp.stat(path.join(dest, 'item'));
+  for (const [actual, expected] of [[actualFile, expectedFile], [actualDirectory, expectedDirectory]]) {
+    assert.equal(actual.atimeMs, expected.atimeMs);
+    assert.equal(actual.mtimeMs, expected.mtimeMs);
+  }
+  await assertText(path.join(dest, 'item'), 'contents');
+});
+
+test('copy preserves symbolic link timestamps without changing the link target', async (t) => {
+  const { root, sourceDir, destDir } = await fixture(t);
+  const target = path.join(root, 'target');
+  const source = path.join(sourceDir, 'link');
+  await fsp.writeFile(target, 'target contents');
+  await fsp.symlink(target, source);
+  await fsp.utimes(target, new Date('2003-02-01T01:02:03Z'), new Date('2004-03-02T04:05:06Z'));
+  await fsp.lutimes(source, new Date('2005-04-03T07:08:09Z'), new Date('2006-05-04T10:11:12Z'));
+  const expectedLink = await fsp.lstat(source);
+  const expectedTarget = await fsp.stat(target);
+  const dest = await operations.copyItem(source, destDir);
+  const actualLink = await fsp.lstat(dest);
+  const actualTarget = await fsp.stat(target);
+  assert.equal(actualLink.isSymbolicLink(), true);
+  assert.equal(actualLink.atimeMs, expectedLink.atimeMs);
+  assert.equal(actualLink.mtimeMs, expectedLink.mtimeMs);
+  assert.equal(actualTarget.atimeMs, expectedTarget.atimeMs);
+  assert.equal(actualTarget.mtimeMs, expectedTarget.mtimeMs);
+  assert.equal(await fsp.readlink(dest), target);
+});
+
+test('batch validation protects another selected source inside an overwritten directory', async (t) => {
+  const { root, sourceDir, destDir } = await fixture(t);
+  const source = path.join(sourceDir, 'folder');
+  const existing = path.join(destDir, 'folder');
+  const otherSource = path.join(existing, 'selected.txt');
+  const alias = path.join(root, 'existing-alias');
+  await fsp.mkdir(source);
+  await fsp.mkdir(existing);
+  await fsp.writeFile(path.join(source, 'new'), 'new contents');
+  await fsp.writeFile(otherSource, 'selected original');
+  await fsp.symlink(existing, alias);
+  for (const paths of [[source, otherSource], [otherSource, source], [source, path.join(alias, 'selected.txt')]]) {
+    await assert.rejects(operations.validateBatch(paths, destDir, { conflict: 'overwrite' }), /선택한 원본을 포함/);
+  }
+  await operations.validateBatch([source, otherSource], destDir, { conflict: 'keepBoth' });
+  await assertText(path.join(source, 'new'), 'new contents');
+  await assertText(otherSource, 'selected original');
+  assert.deepEqual(await fsp.readdir(existing), ['selected.txt']);
+  await assertNoWorkspace(destDir);
+});

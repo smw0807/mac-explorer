@@ -86,8 +86,9 @@ async function copyTree(src, dest, { job, report } = {}) {
   const st = await fsp.lstat(src);
   if (st.isSymbolicLink()) {
     await fsp.symlink(await fsp.readlink(src), dest);
+    await fsp.lutimes(dest, st.atime, st.mtime);
   } else if (st.isDirectory()) {
-    await fsp.mkdir(dest);
+    await fsp.mkdir(dest, { mode: 0o700 });
     for (const name of await fsp.readdir(src)) {
       await copyTree(path.join(src, name), path.join(dest, name), { job, report });
     }
@@ -96,12 +97,16 @@ async function copyTree(src, dest, { job, report } = {}) {
     const input = fs.createReadStream(src);
     input.on('data', (chunk) => { if (report) report.copied += chunk.length; });
     try {
-      await pipeline(input, fs.createWriteStream(dest, { flags: 'wx' }), { signal: job?.controller?.signal });
+      await pipeline(input, fs.createWriteStream(dest, { flags: 'wx', mode: 0o600 }), { signal: job?.controller?.signal });
     } catch (err) { checkCanceled(job); throw err; }
   } else {
     throw new Error(`지원하지 않는 파일 유형입니다: ${src}`);
   }
   checkCanceled(job);
+  if (!st.isSymbolicLink()) {
+    await fsp.chmod(dest, st.mode & 0o7777);
+    await fsp.utimes(dest, st.atime, st.mtime);
+  }
 }
 
 // Serialize only the short commit section; concurrent copies can still stage in parallel.
