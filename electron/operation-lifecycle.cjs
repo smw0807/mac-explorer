@@ -37,9 +37,9 @@ function createOperationLifecycle(app, {
 
     void (async () => {
       cancelOperations();
-      // Future renderer/session flushes can run here while windows still exist.
-      await prepareToQuit();
       while (pending.size) await Promise.all([...pending]);
+      // Save the final renderer state after operations and their cleanup finish.
+      await prepareToQuit();
       quitAllowed = true;
       app.quit();
     })().catch((error) => {

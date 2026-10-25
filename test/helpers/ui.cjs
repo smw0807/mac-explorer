@@ -68,7 +68,7 @@ async function flush(action = () => {}) {
 }
 
 async function mountComponent(relativePath, { props = {}, api = {} } = {}) {
-  const listeners = { directory: new Set(), copy: new Set() };
+  const listeners = { directory: new Set(), copy: new Set(), settingsFlush: new Set() };
   const alerts = [];
   const previousAlert = globalThis.alert;
   globalThis.alert = (message) => alerts.push(message);
@@ -83,6 +83,8 @@ async function mountComponent(relativePath, { props = {}, api = {} } = {}) {
     unwatchDir: async () => ({ ok: true }),
     onDirChanged: subscribe(listeners.directory),
     onCopyProgress: subscribe(listeners.copy),
+    onSettingsFlush: subscribe(listeners.settingsFlush),
+    settingsReady: async () => ({ ok: true }),
     fileIcon: async () => ({ ok: false }),
     ...api,
   };
@@ -109,6 +111,13 @@ async function mountComponent(relativePath, { props = {}, api = {} } = {}) {
     },
     async emitCopy(payload) {
       await flush(() => { for (const listener of listeners.copy) listener(payload); });
+    },
+    async requestSettingsFlush(reason = 'close') {
+      const results = [];
+      await flush(async () => {
+        for (const listener of listeners.settingsFlush) results.push(await listener({ reason }));
+      });
+      return results;
     },
     async unmount() {
       if (!mounted) return;
@@ -173,4 +182,4 @@ async function changeValue(element, value) {
   });
 }
 
-module.exports = { mountComponent, mountPane, mountApp, file, deferred, flush, click, key, changeValue };
+module.exports = { loadComponent, mountComponent, mountPane, mountApp, file, deferred, flush, click, key, changeValue };

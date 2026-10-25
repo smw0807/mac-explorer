@@ -24,6 +24,13 @@ html, body, #root {
 
 .app { display: flex; flex-direction: column; height: 100%; }
 .loading-app { align-items: center; justify-content: center; color: var(--text-dim); }
+.settings-status {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 6px 12px; flex-shrink: 0; border-bottom: 1px solid var(--border);
+  background: var(--bg-panel); color: #f0b66b;
+}
+.settings-status span { min-width: 0; overflow-wrap: anywhere; }
+.settings-status button { flex-shrink: 0; }
 
 /* ---------- titlebar / tabs ---------- */
 .titlebar {

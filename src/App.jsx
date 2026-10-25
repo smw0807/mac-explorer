@@ -1,9 +1,10 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import Sidebar from './components/Sidebar.jsx';
 import Pane from './components/Pane.jsx';
 import { basename, formatSize, nextId } from './util.js';
 import { undoLast } from './undo.js';
 import useCopyJobs from './hooks/useCopyJobs.js';
+import useSettingsPersistence from './hooks/useSettingsPersistence.js';
 
 function makePane(path) { return { id: nextId(), initialPath: path }; }
 function makeTab(path) { return { id: nextId(), dual: false, panes: [makePane(path)] }; }
@@ -28,75 +29,81 @@ export default function App() {
   const [showHidden, setShowHidden] = useState(false);
   const [panePaths, setPanePaths] = useState({});
   const [favorites, setFavorites] = useState(null);
+  const [initializationError, setInitializationError] = useState(null);
+  const [initializationAttempt, setInitializationAttempt] = useState(0);
   const navigators = useRef({});
-  const saveTimer = useRef(null);
+  const mountedRef = useRef(true);
   const { jobs: copyJobs, startCopy, cancelCopy } = useCopyJobs();
+  const settingsSnapshot = useMemo(() => {
+    if (!special || !tabs.length || favorites == null) return null;
+    return {
+      favorites,
+      session: {
+        tabs: tabs.map((tab) => ({
+          dual: tab.dual,
+          paths: tab.panes.map((pane) => panePaths[pane.id] || pane.initialPath),
+        })),
+        active: Math.max(0, tabs.findIndex((tab) => tab.id === activeTabId)),
+        showHidden,
+      },
+    };
+  }, [special, tabs, favorites, panePaths, activeTabId, showHidden]);
+  const settings = useSettingsPersistence(settingsSnapshot);
 
   useEffect(() => {
+    let alive = true;
+    mountedRef.current = true;
+    setInitializationError(null);
     (async () => {
-      const res = await window.api.specialDirs();
-      const st = (await window.api.settingsGet()).settings || {};
-      setFavorites(Array.isArray(st.favorites) ? st.favorites : defaultFavorites(res));
+      try {
+        const res = await window.api.specialDirs();
+        if (!alive) return;
+        if (res.ok === false) throw new Error(res.error);
+        const saved = await window.api.settingsGet();
+        if (!alive) return;
+        if (saved.ok === false) throw new Error(saved.error);
+        const st = saved.settings || {};
 
-      // 이전 세션 탭 복원 (존재하는 경로만)
-      let restored = [];
-      for (const t of st.session?.tabs || []) {
-        const paths = [];
-        for (const p of (t.paths || []).slice(0, 2)) {
-          const ex = await window.api.exists(p);
-          if (ex.exists && ex.isDir) paths.push(p);
+        // 이전 세션 탭 복원 (존재하는 경로만)
+        let restored = [];
+        for (const t of st.session?.tabs || []) {
+          const paths = [];
+          for (const p of (t.paths || []).slice(0, 2)) {
+            const ex = await window.api.exists(p);
+            if (!alive) return;
+            if (ex.exists && ex.isDir) paths.push(p);
+          }
+          if (paths.length) {
+            const dual = !!t.dual && paths.length > 1;
+            restored.push({ id: nextId(), dual, panes: paths.slice(0, dual ? 2 : 1).map((p) => makePane(p)) });
+          }
         }
-        if (paths.length) {
-          const dual = !!t.dual && paths.length > 1;
-          restored.push({ id: nextId(), dual, panes: paths.slice(0, dual ? 2 : 1).map((p) => makePane(p)) });
-        }
+        if (!restored.length) restored = [makeTab(res.home)];
+        const act = restored[Math.min(st.session?.active ?? 0, restored.length - 1)];
+        setFavorites(Array.isArray(st.favorites) ? st.favorites : defaultFavorites(res));
+        setSpecial(res);
+        setTabs(restored);
+        setActiveTabId(act.id);
+        setActivePaneId(act.panes[0].id);
+        setShowHidden(!!st.session?.showHidden);
+      } catch (error) {
+        if (alive) setInitializationError(error.message || String(error));
       }
-      if (!restored.length) restored = [makeTab(res.home)];
-      const act = restored[Math.min(st.session?.active ?? 0, restored.length - 1)];
-      setSpecial(res);
-      setTabs(restored);
-      setActiveTabId(act.id);
-      setActivePaneId(act.panes[0].id);
-      if (st.session?.showHidden) setShowHidden(true);
     })();
-  }, []);
-
-  // 세션(탭/경로/듀얼/숨김) 저장 — 변경 후 500ms 디바운스
-  useEffect(() => {
-    if (!special || !tabs.length) return;
-    clearTimeout(saveTimer.current);
-    saveTimer.current = setTimeout(() => {
-      window.api.settingsSet({
-        session: {
-          tabs: tabs.map((t) => ({
-            dual: t.dual,
-            paths: t.panes.map((p) => panePaths[p.id] || p.initialPath),
-          })),
-          active: Math.max(0, tabs.findIndex((t) => t.id === activeTabId)),
-          showHidden,
-        },
-      });
-    }, 500);
-    return () => clearTimeout(saveTimer.current);
-  }, [tabs, activeTabId, panePaths, showHidden, special]);
+    return () => { alive = false; mountedRef.current = false; };
+  }, [initializationAttempt]);
 
   const addFavorite = useCallback(async (p) => {
     const ex = await window.api.exists(p);
-    if (!ex.exists || !ex.isDir) return;
+    if (!mountedRef.current || !ex.exists || !ex.isDir) return;
     setFavorites((prev) => {
       if (prev.some((f) => f.path === p)) return prev;
-      const next = [...prev, { icon: '📁', name: basename(p), path: p }];
-      window.api.settingsSet({ favorites: next });
-      return next;
+      return [...prev, { icon: '📁', name: basename(p), path: p }];
     });
   }, []);
 
   const removeFavorite = useCallback((p) => {
-    setFavorites((prev) => {
-      const next = prev.filter((f) => f.path !== p);
-      window.api.settingsSet({ favorites: next });
-      return next;
-    });
+    setFavorites((prev) => prev.filter((f) => f.path !== p));
   }, []);
 
   const activeTab = tabs.find((t) => t.id === activeTabId);
@@ -173,7 +180,14 @@ export default function App() {
     if (fn) fn(path);
   }, [activePaneId]);
 
-  if (!special) return <div className="app loading-app">불러오는 중…</div>;
+  if (!special) return (
+    <div className="app loading-app">
+      {initializationError ? <>
+        <span role="alert">설정을 불러오지 못했습니다: {initializationError}</span>
+        <button className="tb-btn" onClick={() => setInitializationAttempt((value) => value + 1)}>다시 시도</button>
+      </> : '불러오는 중…'}
+    </div>
+  );
 
   return (
     <div className="app">
@@ -209,6 +223,15 @@ export default function App() {
           >👓</button>
         </div>
       </div>
+
+      {settings.error && (
+        <div className="settings-status" role="alert">
+          <span>설정을 저장하지 못했습니다: {settings.error}</span>
+          <button className="tb-btn" disabled={settings.saving} onClick={settings.retry}>
+            {settings.saving ? '저장 중…' : '다시 시도'}
+          </button>
+        </div>
+      )}
 
       <div className="body">
         <Sidebar

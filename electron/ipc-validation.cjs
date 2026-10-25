@@ -89,6 +89,8 @@ const schemas = {
   'clipboard:writeText': [string],
   'settings:get': [],
   'settings:set': [validateSettingsPatch],
+  'settings:ready': [boolean],
+  'settings:flushResult': [text(128), (value) => record(value, { ok: boolean, error: optional(text(4096, true)) })],
   'fs:copyCancel': [integer(1, Number.MAX_SAFE_INTEGER)],
   'fs:watch': [text(128), absolutePath],
   'fs:unwatch': [text(128)],

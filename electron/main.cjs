@@ -12,6 +12,7 @@ const { compress, extract } = require('./archive.cjs');
 const { absolutePath, validateArguments, validateSender } = require('./ipc-validation.cjs');
 const { readSettings, writeSettings } = require('./settings.cjs');
 const { createOperationLifecycle } = require('./operation-lifecycle.cjs');
+const { createSettingsLifecycle } = require('./settings-lifecycle.cjs');
 const { createUndoRegistry } = require('./undo-registry.cjs');
 
 const undoRegistry = createUndoRegistry({ moveItem, trashItem: (p) => shell.trashItem(p) });
@@ -39,6 +40,22 @@ const fileMutationChannels = new Set([
   'fs:copy', 'fs:copyStart', 'fs:move', 'fs:trash', 'fs:rename',
   'fs:mkdir', 'fs:newFile', 'fs:compress', 'fs:extract', 'fs:undo',
 ]);
+let settingsErrorDialog;
+function showSettingsError(error) {
+  if (settingsErrorDialog) return;
+  const options = { type: 'error', title: '설정 저장 실패', message: '설정을 저장하지 못해 창을 닫지 않았습니다.',
+    detail: `${error.message}\n문제를 해결한 뒤 다시 닫아 저장을 재시도할 수 있습니다.`, buttons: ['확인'] };
+  const win = error.window;
+  settingsErrorDialog = Promise.resolve(win && !win.isDestroyed()
+    ? dialog.showMessageBox(win, options) : dialog.showMessageBox(options))
+    .catch((dialogError) => console.error(dialogError))
+    .finally(() => { settingsErrorDialog = undefined; });
+}
+const settingsLifecycle = createSettingsLifecycle({
+  getWindows: () => BrowserWindow.getAllWindows(),
+  isQuitting: () => operations.isShuttingDown(),
+  onError: showSettingsError,
+});
 const operations = createOperationLifecycle(app, {
   cancelOperations: () => {
     for (const job of copyJobs.values()) {
@@ -46,6 +63,8 @@ const operations = createOperationLifecycle(app, {
       job.controller.abort();
     }
   },
+  prepareToQuit: () => settingsLifecycle.prepareToQuit(),
+  onError: (error) => { settingsLifecycle.cancelQuit(error); showSettingsError(error); },
 });
 
 function createWindow() {
@@ -67,6 +86,8 @@ function createWindow() {
       webviewTag: false,
     },
   });
+
+  settingsLifecycle.register(win);
 
   win.webContents.on('will-navigate', (event) => event.preventDefault());
   win.webContents.on('will-frame-navigate', (event) => event.preventDefault());
@@ -426,6 +447,15 @@ handle('fs:extract', (e, zipPath) => createWithUndo(e.sender,
 const settingsFile = () => path.join(app.getPath('userData'), 'settings.json');
 
 handle('settings:get', () => ok({ settings: readSettings(settingsFile()) }));
+
+handle('settings:ready', (event, ready) => {
+  settingsLifecycle.setReady(event, ready);
+  return ok({});
+});
+
+handle('settings:flushResult', (event, requestId, result) => {
+  return ok({ accepted: settingsLifecycle.acknowledge(event, requestId, result) });
+});
 
 handle('settings:set', (_e, patch) => {
   try {
