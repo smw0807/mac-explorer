@@ -26,8 +26,25 @@ function loadMain({ overrides = {}, userData, onSend = () => {}, shell = {}, dev
     static fromWebContents(contents) { return windows.find((window) => window.webContents === contents) || null; }
     static getAllWindows() { return windows; }
   }
+  const app = Object.assign(new EventEmitter(), {
+    isPackaged: !development,
+    whenReady: () => ({ then(callback) { ready = callback; } }),
+    getPath: () => userData,
+    quitAttempts: 0,
+    completedQuits: 0,
+    quit() {
+      this.quitAttempts++;
+      const event = { defaultPrevented: false, preventDefault() { this.defaultPrevented = true; } };
+      this.emit('before-quit', event);
+      if (!event.defaultPrevented) {
+        this.completedQuits++;
+        this.emit('will-quit');
+      }
+      return event;
+    },
+  });
   const electron = {
-    app: { isPackaged: !development, whenReady: () => ({ then(callback) { ready = callback; } }), on() {}, getPath: () => userData },
+    app,
     protocol: { registerSchemesAsPrivileged(value) { schemes = value; }, handle: (name, callback) => protocols.set(name, callback) },
     ipcMain: { handle: (name, callback) => handlers.set(name, callback) },
     BrowserWindow,

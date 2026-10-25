@@ -11,6 +11,7 @@ const { statEntry, uniqueDest, copyItem, moveItem, treeSize, cancelError, valida
 const { compress } = require('./archive.cjs');
 const { absolutePath, validateArguments, validateSender } = require('./ipc-validation.cjs');
 const { readSettings, writeSettings } = require('./settings.cjs');
+const { createOperationLifecycle } = require('./operation-lifecycle.cjs');
 
 // custom protocol for previewing local files (images/video) in the renderer
 protocol.registerSchemesAsPrivileged([
@@ -21,8 +22,21 @@ protocol.registerSchemesAsPrivileged([
 // so dev mode requires the dev script to opt in via VITE_DEV=1
 const isDev = !app.isPackaged && process.env.VITE_DEV === '1';
 const appURL = isDev ? 'http://localhost:5173/' : pathToFileURL(path.join(__dirname, '../dist/index.html')).href;
+const fileMutationChannels = new Set([
+  'fs:copy', 'fs:copyStart', 'fs:move', 'fs:trash', 'fs:rename',
+  'fs:mkdir', 'fs:newFile', 'fs:compress', 'fs:extract',
+]);
+const operations = createOperationLifecycle(app, {
+  cancelOperations: () => {
+    for (const job of copyJobs.values()) {
+      job.canceled = true;
+      job.controller.abort();
+    }
+  },
+});
 
 function createWindow() {
+  if (operations.isShuttingDown()) return;
   const win = new BrowserWindow({
     width: 1280,
     height: 800,
@@ -114,7 +128,8 @@ function handle(channel, callback) {
     try {
       validateSender(event, appURL);
       validateArguments(channel, args);
-      const result = callback(event, ...args);
+      const invoke = () => callback(event, ...args);
+      const result = fileMutationChannels.has(channel) ? operations.run(invoke) : invoke();
       return result && typeof result.catch === 'function' ? result.catch(fail) : result;
     } catch (err) { return fail(err); }
   });
@@ -198,7 +213,7 @@ handle('fs:copyStart', (e, paths, destDir, opts = {}) => {
   const onDestroyed = () => { job.canceled = true; job.controller.abort(); };
   sender.once('destroyed', onDestroyed);
 
-  (async () => {
+  operations.run(async () => {
     const report = { copied: 0, total: 0, currentFile: '' };
     const send = (extra = {}) => {
       if (!sender.isDestroyed()) {
@@ -227,7 +242,7 @@ handle('fs:copyStart', (e, paths, destDir, opts = {}) => {
       copyJobs.delete(jobId);
       sender.removeListener('destroyed', onDestroyed);
     }
-  })();
+  });
 
   return ok({ jobId });
 });
