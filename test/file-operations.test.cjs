@@ -10,17 +10,19 @@ const operationsPath = path.resolve(__dirname, '../electron/file-operations.cjs'
 const operations = require(operationsPath);
 
 function loadOperations(overrides = {}) {
-  const module = { exports: {} };
-  const source = fs.readFileSync(operationsPath, 'utf8');
-  const evaluate = vm.runInThisContext(`(function (require, module, exports) {\n${source}\n})`, {
-    filename: operationsPath,
-  });
-  evaluate((name) => {
-    if (name === 'fs/promises') return { ...fsp, ...overrides.fsp };
-    if (name === 'fs') return { ...fs, ...overrides.fs };
-    return require(name);
-  }, module, module.exports);
-  return module.exports;
+  function load(filename) {
+    const module = { exports: {} };
+    const source = fs.readFileSync(filename, 'utf8');
+    const evaluate = vm.runInThisContext(`(function (require, module, exports) {\n${source}\n})`, { filename });
+    evaluate((name) => {
+      if (name === 'fs/promises') return { ...fsp, ...overrides.fsp };
+      if (name === 'fs') return { ...fs, ...overrides.fs };
+      if (name === './file-snapshot.cjs') return load(path.resolve(path.dirname(filename), name));
+      return require(name);
+    }, module, module.exports);
+    return module.exports;
+  }
+  return load(operationsPath);
 }
 
 function fsError(code) {
@@ -341,15 +343,221 @@ test('EXDEV source cleanup failure preserves the fully committed destination', a
       if (from === source) throw fsError('EXDEV');
       return fsp.rename(from, to);
     },
-    async rm(target, options) {
+    async unlink(target) {
       if (target === source) throw fsError('EACCES');
-      return fsp.rm(target, options);
+      return fsp.unlink(target);
     },
   } });
   await assert.rejects(isolated.moveItem(source, destDir, { conflict: 'overwrite' }), (err) => {
     return err.code === 'EACCES' && err.committedDest === dest && err.message.includes(dest);
   });
   await assertText(source, 'new contents');
+  await assertText(dest, 'new contents');
+  await assertNoWorkspace(destDir);
+});
+
+for (const operation of ['copyItem', 'moveItem']) {
+  test(`${operation} rejects a source edit after copying and preserves the old destination`, async (t) => {
+    const { source, dest, destDir } = await pair(t);
+    const isolated = loadOperations({ fsp: {
+      async rename(from, to) {
+        if (from === source) throw fsError('EXDEV');
+        return fsp.rename(from, to);
+      },
+    } });
+    const writer = async (input, staged, opts) => {
+      await operations.copyTree(input, staged, opts);
+      await fsp.writeFile(input, 'new edit after copying');
+    };
+    await assert.rejects(isolated[operation](source, destDir, { conflict: 'overwrite' }, writer), { code: 'FS_CHANGED' });
+    await assertText(source, 'new edit after copying');
+    await assertText(dest, 'existing contents');
+    await assertNoWorkspace(destDir);
+  });
+}
+
+test('EXDEV rejects new source children created after copying without deleting them', async (t) => {
+  const { sourceDir, destDir } = await fixture(t);
+  const source = path.join(sourceDir, 'folder');
+  await fsp.mkdir(source);
+  await fsp.writeFile(path.join(source, 'original'), 'original');
+  const isolated = loadOperations({ fsp: {
+    async rename(from, to) {
+      if (from === source) throw fsError('EXDEV');
+      return fsp.rename(from, to);
+    },
+  } });
+  const writer = async (input, staged, opts) => {
+    await operations.copyTree(input, staged, opts);
+    await fsp.writeFile(path.join(input, 'new'), 'created after copying');
+  };
+  await assert.rejects(isolated.moveItem(source, destDir, {}, writer), { code: 'FS_CHANGED' });
+  await assertText(path.join(source, 'new'), 'created after copying');
+  await assertText(path.join(source, 'original'), 'original');
+  await assertMissing(path.join(destDir, 'folder'));
+  await assertNoWorkspace(destDir);
+});
+
+test('a source edited while its stream is being read is never committed', async (t) => {
+  const { source, dest, destDir } = await pair(t);
+  await fsp.writeFile(source, Buffer.alloc(1024 * 1024, 1));
+  const isolated = loadOperations({ fs: {
+    createReadStream(...args) {
+      const input = fs.createReadStream(...args);
+      input.once('data', () => fs.writeFileSync(source, Buffer.alloc(1024 * 1024, 2)));
+      return input;
+    },
+  } });
+  await assert.rejects(isolated.copyItem(source, destDir, { conflict: 'overwrite' }), { code: 'FS_CHANGED' });
+  assert.deepEqual(await fsp.readFile(source), Buffer.alloc(1024 * 1024, 2));
+  await assertText(dest, 'existing contents');
+  await assertNoWorkspace(destDir);
+});
+
+test('overwrite detects edits to a destination child even when its parent stat is unchanged', async (t) => {
+  const { sourceDir, destDir } = await fixture(t);
+  const source = path.join(sourceDir, 'folder');
+  const dest = path.join(destDir, 'folder');
+  await fsp.mkdir(source);
+  await fsp.mkdir(dest);
+  await fsp.writeFile(path.join(source, 'new'), 'new contents');
+  await fsp.writeFile(path.join(dest, 'existing'), 'old contents');
+  const before = await fsp.lstat(dest, { bigint: true });
+  const writer = async (input, staged, opts) => {
+    await operations.copyTree(input, staged, opts);
+    await fsp.writeFile(path.join(dest, 'existing'), 'edited externally');
+    const after = await fsp.lstat(dest, { bigint: true });
+    assert.equal(after.mtimeNs, before.mtimeNs);
+    assert.equal(after.ctimeNs, before.ctimeNs);
+  };
+  await assert.rejects(operations.copyItem(source, destDir, { conflict: 'overwrite' }, writer), /작업 중 대상이 변경/);
+  await assertText(path.join(dest, 'existing'), 'edited externally');
+  await assertMissing(path.join(dest, 'new'));
+  await assertNoWorkspace(destDir);
+});
+
+test('EXDEV preserves a source changed after commit and reports the complete destination', async (t) => {
+  const { source, dest, destDir } = await pair(t);
+  const isolated = loadOperations({ fsp: {
+    async rename(from, to) {
+      if (from === source) throw fsError('EXDEV');
+      await fsp.rename(from, to);
+      if (to === dest && path.basename(from) === 'new') await fsp.writeFile(source, 'edited after commit');
+    },
+  } });
+  await assert.rejects(isolated.moveItem(source, destDir, { conflict: 'overwrite' }), (err) => {
+    return err.code === 'FS_CHANGED' && err.committedDest === dest && err.retainedPath === source;
+  });
+  await assertText(source, 'edited after commit');
+  await assertText(dest, 'new contents');
+  await assertNoWorkspace(destDir);
+});
+
+test('EXDEV stops cleanup when a new source child appears between verified deletions', async (t) => {
+  const { sourceDir, destDir } = await fixture(t);
+  const source = path.join(sourceDir, 'folder');
+  const dest = path.join(destDir, 'folder');
+  await fsp.mkdir(source);
+  await fsp.writeFile(path.join(source, 'a'), 'first');
+  await fsp.writeFile(path.join(source, 'b'), 'second');
+  const isolated = loadOperations({ fsp: {
+    async rename(from, to) {
+      if (from === source) throw fsError('EXDEV');
+      return fsp.rename(from, to);
+    },
+    async unlink(p) {
+      await fsp.unlink(p);
+      if (p === path.join(source, 'a')) await fsp.writeFile(path.join(source, 'late'), 'new contents');
+    },
+  } });
+  await assert.rejects(isolated.moveItem(source, destDir), (err) => {
+    return err.code === 'FS_CHANGED' && err.committedDest === dest && err.removedCount === 1;
+  });
+  await assertText(path.join(source, 'late'), 'new contents');
+  await assertText(path.join(source, 'b'), 'second');
+  await assertText(path.join(dest, 'a'), 'first');
+  await assertText(path.join(dest, 'b'), 'second');
+  await assertNoWorkspace(destDir);
+});
+
+test('a backup changed after commit is retained with its recovery path', async (t) => {
+  const { source, dest, destDir } = await pair(t);
+  let backup;
+  const isolated = loadOperations({ fsp: {
+    async rename(from, to) {
+      await fsp.rename(from, to);
+      if (from === dest) backup = to;
+      if (to === dest && path.basename(from) === 'new') await fsp.writeFile(backup, 'edited through an open handle');
+    },
+  } });
+  await assert.rejects(isolated.copyItem(source, destDir, { conflict: 'overwrite' }), (err) => {
+    return err.code === 'FS_CHANGED' && err.committedDest === dest && err.recoveryPath === backup && err.message.includes(backup);
+  });
+  await assertText(backup, 'edited through an open handle');
+  await assertText(dest, 'new contents');
+  await assertText(source, 'new contents');
+  assert.deepEqual(await fsp.readdir(path.dirname(backup)), ['previous']);
+});
+
+test('a new backup child appearing just before rmdir is retained instead of recursively removed', async (t) => {
+  const { sourceDir, destDir } = await fixture(t);
+  const source = path.join(sourceDir, 'folder');
+  const dest = path.join(destDir, 'folder');
+  await fsp.mkdir(source);
+  await fsp.mkdir(dest);
+  await fsp.writeFile(path.join(source, 'new'), 'new contents');
+  await fsp.writeFile(path.join(dest, 'old'), 'old contents');
+  let backup;
+  const isolated = loadOperations({ fsp: {
+    async rmdir(p) {
+      if (path.basename(p) === 'previous') {
+        backup = p;
+        await fsp.writeFile(path.join(p, 'late'), 'created during cleanup');
+      }
+      return fsp.rmdir(p);
+    },
+  } });
+  await assert.rejects(isolated.copyItem(source, destDir, { conflict: 'overwrite' }), (err) => {
+    return ['ENOTEMPTY', 'EEXIST'].includes(err.code) && err.committedDest === dest && err.recoveryPath === backup;
+  });
+  await assertText(path.join(backup, 'late'), 'created during cleanup');
+  await assertText(path.join(dest, 'new'), 'new contents');
+});
+
+test('EXDEV and overwrite cleanup handle their own hardlink ctime changes', async (t) => {
+  const { sourceDir, destDir } = await fixture(t);
+  const source = path.join(sourceDir, 'folder');
+  const dest = path.join(destDir, 'folder');
+  for (const folder of [source, dest]) {
+    await fsp.mkdir(path.join(folder, 'nested'), { recursive: true });
+    await fsp.writeFile(path.join(folder, 'a'), folder === source ? 'new contents' : 'old contents');
+    await fsp.link(path.join(folder, 'a'), path.join(folder, 'nested', 'b'));
+  }
+  const isolated = loadOperations({ fsp: {
+    async rename(from, to) {
+      if (from === source) throw fsError('EXDEV');
+      return fsp.rename(from, to);
+    },
+  } });
+  assert.equal(await isolated.moveItem(source, destDir, { conflict: 'overwrite' }), dest);
+  await assertMissing(source);
+  await assertText(path.join(dest, 'a'), 'new contents');
+  await assertText(path.join(dest, 'nested', 'b'), 'new contents');
+  await assertNoWorkspace(destDir);
+});
+
+test('cancellation after backup rename finishes committed cleanup', async (t) => {
+  const { source, dest, destDir } = await pair(t);
+  const job = { canceled: false, controller: new AbortController() };
+  const isolated = loadOperations({ fsp: {
+    async rename(from, to) {
+      if (from === source) throw fsError('EXDEV');
+      await fsp.rename(from, to);
+      if (from === dest) { job.canceled = true; job.controller.abort(); }
+    },
+  } });
+  assert.equal(await isolated.moveItem(source, destDir, { conflict: 'overwrite', job }), dest);
+  await assertMissing(source);
   await assertText(dest, 'new contents');
   await assertNoWorkspace(destDir);
 });

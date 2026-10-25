@@ -197,7 +197,10 @@ handle('fs:copy', async (_e, paths, destDir, opts = {}) => {
       if (dest) created.push(dest);
     }
     return ok({ created });
-  } catch (err) { return { ...fail(err), created }; }
+  } catch (err) {
+    if (err.committedDest && !created.includes(err.committedDest)) created.push(err.committedDest);
+    return { ...fail(err), created };
+  }
 });
 
 /* ---------- copy with progress ---------- */
@@ -237,6 +240,7 @@ handle('fs:copyStart', (e, paths, destDir, opts = {}) => {
       send({ done: true, created });
     } catch (err) {
       clearInterval(timer);
+      if (err.committedDest && !created.includes(err.committedDest)) created.push(err.committedDest);
       send({ done: true, created, canceled: !!err.canceled, error: err.canceled ? null : (err.message || String(err)) });
     } finally {
       copyJobs.delete(jobId);

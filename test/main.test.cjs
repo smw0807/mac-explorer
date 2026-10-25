@@ -133,3 +133,23 @@ test('trash reports the exact successful subset on failure', async () => {
   assert.equal(result.ok, false);
   assert.deepEqual(result.trashed, ['/first']);
 });
+
+for (const progress of [false, true]) {
+  test(`copy ${progress ? 'progress' : 'response'} reports a committed destination when backup cleanup fails`, async () => {
+    let finish;
+    const done = new Promise((resolve) => { finish = resolve; });
+    const api = loadMain({
+      onSend: (_channel, event) => { if (event.done) finish(event); },
+      overrides: { './file-operations.cjs': {
+        ...operations,
+        validateBatch: async () => {},
+        treeSize: async () => 1,
+        copyItem: async () => { throw Object.assign(new Error('changed backup preserved'), { committedDest: '/dest/file' }); },
+      } },
+    });
+    const response = api.invoke(progress ? 'fs:copyStart' : 'fs:copy', ['/source/file'], '/dest');
+    const result = await (progress ? done : response);
+    assert.deepEqual(result.created, ['/dest/file']);
+    assert.match(result.error, /changed backup preserved/);
+  });
+}
