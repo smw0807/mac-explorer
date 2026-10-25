@@ -27,6 +27,7 @@ export default defineConfig(({ command }) => ({
     },
   }],
   base: './',
+  optimizeDeps: { include: ['react-dom/client'] },
   build: { outDir: 'dist' },
   server: { port: 5173, strictPort: true },
 }));

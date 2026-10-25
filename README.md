@@ -66,10 +66,14 @@
 
 ## 실행 방법
 
+실행에는 **macOS 13 이상**이 필요합니다(Electron 45 기준).
+개발 환경은 **Node.js 24.15.0 이상인 24.x 또는 26 이상**을 사용하세요.
+
 ```bash
-# Node.js 18+ 필요 (https://nodejs.org)
 cd mac-explorer
-npm install
+
+# 잠금 파일 기준으로 의존성 설치 (권장)
+npm ci
 
 # 개발 모드 (핫 리로드)
 npm run dev
@@ -80,6 +84,9 @@ npm run start
 # .dmg 배포 파일 만들기 (release/ 폴더에 생성)
 npm run dist
 ```
+
+Electron 42 이상은 처음 실행할 때 플랫폼에 맞는 Electron 바이너리를 다운로드합니다.
+처음 `npm run dev` 또는 `npm run start`를 실행할 때는 네트워크 연결이 필요하며 다운로드 시간이 걸릴 수 있습니다.
 
 첫 실행 시 macOS가 홈/문서/다운로드 폴더 접근 권한을 물어보면 허용해 주세요.
 (시스템 설정 → 개인정보 보호 및 보안 → 파일 및 폴더)

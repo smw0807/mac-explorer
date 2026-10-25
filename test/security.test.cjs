@@ -271,7 +271,7 @@ test('CSP distinguishes production scripts from development refresh and precedes
   assert.match(development, /ws:\/\/localhost:5173/);
   const { createServer } = await import('vite');
   const hmrServer = require('node:http').createServer();
-  const server = await createServer({ server: { middlewareMode: true, hmr: { server: hmrServer } },
+  const server = await createServer({ server: { middlewareMode: true, ws: { server: hmrServer } },
     optimizeDeps: { noDiscovery: true, include: [] } });
   try {
     const html = await server.transformIndexHtml('/', await fsp.readFile(path.resolve(__dirname, '../index.html'), 'utf8'));
