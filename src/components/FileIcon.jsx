@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { fileIcon } from '../util.js';
 
 // 아이콘은 확장자 단위로 동일하므로 확장자별로 한 번만 가져온다.

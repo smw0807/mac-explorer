@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from 'react';
+import { useEffect, useRef } from 'react';
 
 export default function ContextMenu({ x, y, items, onClose }) {
   const ref = useRef(null);

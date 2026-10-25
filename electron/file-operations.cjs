@@ -176,7 +176,7 @@ async function transferItem(src, destDir, opts, moving, writer = copyTree) {
       } catch (err) {
         if (backedUp) {
           try {
-            if (await statEntry(dest)) throw new Error('대상 경로가 사용 중입니다.');
+            if (await statEntry(dest)) throw new Error('대상 경로가 사용 중입니다.', { cause: err });
             await fsp.rename(backup, dest);
           } catch (restoreError) {
             preserveWorkspace = true;
@@ -192,7 +192,7 @@ async function transferItem(src, destDir, opts, moving, writer = copyTree) {
   } catch (err) {
     if (sourceStaged && !committed) {
       try {
-        if (await statEntry(source)) throw new Error('원본 경로가 사용 중입니다.');
+        if (await statEntry(source)) throw new Error('원본 경로가 사용 중입니다.', { cause: err });
         await fsp.rename(staged, source);
       } catch (restoreError) {
         preserveWorkspace = true;

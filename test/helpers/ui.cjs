@@ -29,6 +29,7 @@ function loadComponent(relativePath) {
     write: false,
     platform: 'node',
     format: 'cjs',
+    jsx: 'automatic',
     external: ['react', 'react-dom', 'react-dom/*'],
   });
   // Each mount gets fresh module state, including the application's undo history.

@@ -1,6 +1,12 @@
 .DS_Store
-node_modules
-dist
+node_modules/
+dist/
+release/
 .env
 
-release
+# Vite config bundles and temporary files
+vite.config.*.timestamp-*
+.vite-temp/
+
+# Local runtime and package-manager logs
+*.log

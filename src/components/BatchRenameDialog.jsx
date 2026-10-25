@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import { useState, useMemo } from 'react';
 
 // 다중 선택 항목의 일괄 이름 변경 모달.
 // replace: 찾기/바꾸기, sequence: 패턴(#은 연번, 개수만큼 0 채움) + 시작 번호, 확장자 유지

@@ -1,8 +1,8 @@
-import React, { useState, useCallback } from 'react';
+import { useState, useCallback } from 'react';
 import ContextMenu from './ContextMenu.jsx';
 import { acceptsDrop, dropToDir, extractDropPaths } from '../dnd.js';
 
-function dropTargetProps(destPath, dropTarget, setDropTarget) {
+function dropTargetProps(destPath, setDropTarget) {
   return {
     onDragOver: (e) => {
       if (!acceptsDrop(e)) return;
@@ -30,7 +30,7 @@ function TreeNode({ node, depth, expanded, childrenMap, onToggle, onNavigate, cu
         className={`tree-row ${isCurrent ? 'current' : ''} ${dropTarget === node.path ? 'drag-over' : ''}`}
         style={{ paddingLeft: 8 + depth * 14 }}
         onClick={() => onNavigate(node.path)}
-        {...dropTargetProps(node.path, dropTarget, setDropTarget)}
+        {...dropTargetProps(node.path, setDropTarget)}
       >
         <span
           className={`tree-arrow ${isOpen ? 'open' : ''}`}
@@ -130,7 +130,7 @@ export default function Sidebar({ special, onNavigate, currentPath, favorites, o
               items: [{ label: '즐겨찾기에서 제거', onClick: () => onRemoveFavorite(f.path) }],
             });
           }}
-          {...dropTargetProps(f.path, dropTarget, setDropTarget)}
+          {...dropTargetProps(f.path, setDropTarget)}
         >
           <span className="sb-icon">{f.icon}</span>
           <span>{f.name}</span>

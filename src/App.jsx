@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import Sidebar from './components/Sidebar.jsx';
 import Pane from './components/Pane.jsx';
 import { basename, formatSize, nextId } from './util.js';

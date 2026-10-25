@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { Fragment, useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import ContextMenu from './ContextMenu.jsx';
 import FileIcon from './FileIcon.jsx';
 import BatchRenameDialog from './BatchRenameDialog.jsx';
@@ -11,21 +11,24 @@ import { recordOp } from '../undo.js';
 
 function Preview({ entry }) {
   const [content, setContent] = useState(null);
+  const previewPath = entry?.path;
+  const previewMtime = entry?.mtime;
+  const textLike = !!entry && isTextLike(entry);
   useEffect(() => {
     let alive = true;
     setContent(null);
-    if (entry && isTextLike(entry)) {
+    if (previewPath && textLike) {
       (async () => {
         try {
-          const result = await window.api.readText(entry.path);
-          if (alive) setContent({ path: entry.path, text: result.text, error: result.ok ? null : result.error || '파일을 읽을 수 없습니다.' });
+          const result = await window.api.readText(previewPath);
+          if (alive) setContent({ path: previewPath, text: result.text, error: result.ok ? null : result.error || '파일을 읽을 수 없습니다.' });
         } catch (error) {
-          if (alive) setContent({ path: entry.path, error: error.message || String(error) });
+          if (alive) setContent({ path: previewPath, error: error.message || String(error) });
         }
       })();
     }
     return () => { alive = false; };
-  }, [entry?.path, entry?.mtime]);
+  }, [previewPath, previewMtime, textLike]);
 
   if (!entry) return <div className="preview empty">항목을 선택하면 미리보기가 표시됩니다</div>;
 
@@ -659,7 +662,7 @@ export default function Pane({
         ) : (
           <div className="breadcrumb" onClick={() => { setAddressValue(path); setAddressEdit(true); }}>
             {segments.map((s, i) => (
-              <React.Fragment key={s.path}>
+              <Fragment key={s.path}>
                 {i > 0 && <span className="bc-sep">›</span>}
                 <span
                   className="bc-seg"
@@ -667,7 +670,7 @@ export default function Pane({
                 >
                   {s.name}
                 </span>
-              </React.Fragment>
+              </Fragment>
             ))}
           </div>
         )}
