@@ -229,3 +229,237 @@ test('completed items from a canceled copy remain undoable', async (t) => {
   await key(visiblePane(ui), 'z', { metaKey: true });
   assert.deepEqual(trashed, [['/test/completed.txt']]);
 });
+
+const displayedNames = (ui) => ui.queryAll('.fl-name').map((node) => node.textContent);
+
+async function searchFor(ui, query, spotlight = false) {
+  await changeValue(ui.query('.search-input'), query);
+  await key(ui.query('.search-input'), 'Enter', { metaKey: spotlight });
+}
+
+test('navigation immediately invalidates old directory reads before the new effect runs', async (t) => {
+  const oldRead = deferred();
+  const newRead = deferred();
+  const stats = [];
+  const ui = await mountPane({
+    api: {
+      readDir: (directory) => directory === '/test' ? oldRead.promise : newRead.promise,
+      statfs: async (directory) => { stats.push(directory); return { ok: true, free: 2048 }; },
+    },
+  });
+  t.after(() => ui.unmount());
+
+  await flush(() => {
+    ui.query('.bc-seg').dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    oldRead.resolve({ ok: true, entries: [file('stale.txt')] });
+  });
+  assert.deepEqual(displayedNames(ui), []);
+  await flush(() => newRead.resolve({ ok: true, entries: [file('current.txt', { path: '/current.txt' })] }));
+  assert.deepEqual(displayedNames(ui), ['current.txt']);
+  assert.deepEqual(stats, ['/']);
+});
+
+test('late disk statistics from the previous directory cannot overwrite the current directory', async (t) => {
+  const oldDisk = deferred();
+  const newDisk = deferred();
+  const ui = await mountPane({
+    entries: [file('current.txt')],
+    api: { statfs: (directory) => directory === '/test' ? oldDisk.promise : newDisk.promise },
+  });
+  t.after(() => ui.unmount());
+  await click(ui.query('.bc-seg'));
+  await flush(() => newDisk.resolve({ ok: true, free: 2048 }));
+  assert.match(ui.query('.statusbar').textContent, /2\.0 KB/);
+  await flush(() => oldDisk.resolve({ ok: true, free: 999 }));
+  assert.match(ui.query('.statusbar').textContent, /2\.0 KB/);
+  assert.doesNotMatch(ui.query('.statusbar').textContent, /999 B/);
+});
+
+test('a newer refresh supersedes an older request for the same directory', async (t) => {
+  const oldRead = deferred();
+  const newRead = deferred();
+  let reads = 0;
+  const ui = await mountPane({
+    api: { readDir: () => ++reads === 1 ? oldRead.promise : newRead.promise },
+  });
+  t.after(() => ui.unmount());
+  await click(ui.query('[title="새로 고침"]'));
+  await flush(() => newRead.resolve({ ok: true, entries: [file('new.txt')] }));
+  await flush(() => oldRead.reject(new Error('outdated directory error')));
+  assert.deepEqual(displayedNames(ui), ['new.txt']);
+  assert.equal(ui.query('.fl-error'), null);
+});
+
+for (const cancellation of ['close', 'input Escape', 'pane Escape', 'edit query']) {
+  test(`pending search stays canceled after ${cancellation}`, async (t) => {
+    const result = deferred();
+    const ui = await mountPane({ entries: [file('base.txt')], api: { search: () => result.promise } });
+    t.after(() => ui.unmount());
+    await searchFor(ui, 'old');
+    assert.match(ui.query('.search-banner').textContent, /검색 중/);
+    if (cancellation === 'close') await click(ui.query('.search-banner button'));
+    if (cancellation === 'input Escape') await key(ui.query('.search-input'), 'Escape');
+    if (cancellation === 'pane Escape') await key(ui.query('.pane'), 'Escape');
+    if (cancellation === 'edit query') await changeValue(ui.query('.search-input'), 'base');
+    await flush(() => result.resolve({ ok: true, entries: [file('old-result.txt')] }));
+    assert.equal(ui.query('.search-banner'), null);
+    assert.equal(ui.query('.search-input').value, cancellation === 'edit query' ? 'base' : '');
+    assert.deepEqual(displayedNames(ui), ['base.txt']);
+  });
+}
+
+test('a newer Spotlight search wins over a delayed recursive search', async (t) => {
+  const oldResult = deferred();
+  const ui = await mountPane({
+    api: {
+      search: () => oldResult.promise,
+      searchSpotlight: async () => ({ ok: true, entries: [file('spotlight.txt')] }),
+    },
+  });
+  t.after(() => ui.unmount());
+  await searchFor(ui, 'old');
+  await searchFor(ui, 'new', true);
+  await flush(() => oldResult.resolve({ ok: true, entries: [file('old-result.txt')] }));
+  assert.equal(ui.query('.search-input').value, 'new');
+  assert.match(ui.query('.search-banner').textContent, /Spotlight/);
+  assert.deepEqual(displayedNames(ui), ['spotlight.txt']);
+});
+
+test('navigation suppresses a delayed Spotlight search response', async (t) => {
+  const result = deferred();
+  const ui = await mountPane({
+    api: {
+      readDir: async (directory) => ({ ok: true, entries: [file(directory === '/' ? 'root.txt' : 'old.txt')] }),
+      searchSpotlight: () => result.promise,
+    },
+  });
+  t.after(() => ui.unmount());
+  await searchFor(ui, 'old', true);
+  await click(ui.query('.bc-seg'));
+  await flush(() => result.resolve({ ok: true, entries: [file('old-result.txt')] }));
+  assert.equal(ui.query('.search-banner'), null);
+  assert.equal(ui.query('.search-input').value, '');
+  assert.deepEqual(displayedNames(ui), ['root.txt']);
+});
+
+for (const spotlight of [false, true]) {
+  test(`${spotlight ? 'Spotlight' : 'recursive'} search reruns with the current hidden-file setting`, async (t) => {
+    const oldResult = deferred();
+    const calls = [];
+    const search = (directory, query, options) => {
+      calls.push({ directory, query, options });
+      return options.showHidden
+        ? Promise.resolve({ ok: true, entries: [file('.secret.txt')] })
+        : oldResult.promise;
+    };
+    const ui = await mountPane({ api: { search, searchSpotlight: search } });
+    t.after(() => ui.unmount());
+    await searchFor(ui, 'secret', spotlight);
+    await ui.update({ showHidden: true });
+    await flush(() => oldResult.resolve({ ok: true, entries: [file('outdated.txt')] }));
+    assert.deepEqual(calls, [
+      { directory: '/test', query: 'secret', options: { showHidden: false } },
+      { directory: '/test', query: 'secret', options: { showHidden: true } },
+    ]);
+    assert.deepEqual(displayedNames(ui), ['.secret.txt']);
+    assert.equal(ui.query('.search-input').value, 'secret');
+    assert.equal(ui.query('.search-banner').textContent.includes('Spotlight'), spotlight);
+  });
+}
+
+test('search reports failures and truncated results instead of showing a misleading complete result count', async (t) => {
+  let calls = 0;
+  const ui = await mountPane({
+    api: { search: async () => ++calls === 1 ? { ok: false, error: 'permission denied' } : { ok: true, entries: [file('one.txt')], truncated: true } },
+  });
+  t.after(() => ui.unmount());
+  await searchFor(ui, 'one');
+  assert.match(ui.query('.search-banner').textContent, /검색 실패: permission denied/);
+  await key(ui.query('.search-input'), 'Enter');
+  assert.match(ui.query('.search-banner').textContent, /검색 결과 1개.*일부 결과만 표시/);
+});
+
+test('back and forward reset search, selection, and address editing and ignore outstanding searches', async (t) => {
+  const pending = deferred();
+  let calls = 0;
+  const ui = await mountPane({
+    api: {
+      readDir: async (directory) => ({ ok: true, entries: directory === '/test' ? [file('child', { isDir: true })] : [file('child-file.txt', { path: '/test/child/child-file.txt' })] }),
+      search: async () => ++calls === 1 ? { ok: true, entries: [file('result.txt')] } : pending.promise,
+    },
+  });
+  t.after(() => ui.unmount());
+  await click(ui.query('.fl-row'));
+  await key(ui.query('.pane'), 'Enter');
+  await searchFor(ui, 'result');
+  await click(ui.query('.fl-row'));
+  await key(ui.query('.pane'), 'l', { metaKey: true });
+  assert.ok(ui.query('.address-input'));
+  assert.match(ui.query('.statusbar').textContent, /1개 선택됨/);
+  await click(ui.query('[title="뒤로"]'));
+  assert.equal(ui.query('.bc-seg:last-child').textContent, 'test');
+  assert.equal(ui.query('.search-banner'), null);
+  assert.equal(ui.query('.search-input').value, '');
+  assert.equal(ui.query('.address-input'), null);
+  assert.doesNotMatch(ui.query('.statusbar').textContent, /선택됨/);
+
+  await searchFor(ui, 'pending');
+  await key(ui.query('.pane'), 'l', { metaKey: true });
+  await click(ui.query('[title="앞으로"]'));
+  await flush(() => pending.resolve({ ok: true, entries: [file('stale.txt')] }));
+  assert.equal(ui.query('.bc-seg:last-child').textContent, 'child');
+  assert.equal(ui.query('.search-banner'), null);
+  assert.equal(ui.query('.search-input').value, '');
+  assert.equal(ui.query('.address-input'), null);
+  assert.deepEqual(displayedNames(ui), ['child-file.txt']);
+});
+
+test('text preview ignores an older file response and displays both returned and thrown read errors', async (t) => {
+  const first = deferred();
+  const second = deferred();
+  const calls = new Map();
+  const ui = await mountPane({
+    entries: [file('alpha.txt'), file('beta.txt')],
+    api: {
+      readText: (filename) => {
+        const count = (calls.get(filename) || 0) + 1;
+        calls.set(filename, count);
+        if (filename.endsWith('alpha.txt')) return count === 1 ? first.promise : Promise.resolve({ ok: false, error: 'read denied' });
+        return count === 1 ? second.promise : Promise.reject(new Error('IPC read failed'));
+      },
+    },
+  });
+  t.after(() => ui.unmount());
+  await click(ui.query('[title="미리보기 (Space)"]'));
+  await click(ui.queryAll('.fl-row')[0]);
+  await click(ui.queryAll('.fl-row')[1]);
+  await flush(() => second.resolve({ ok: true, text: 'beta contents' }));
+  await flush(() => first.resolve({ ok: true, text: 'outdated alpha contents' }));
+  assert.equal(ui.query('.preview pre').textContent, 'beta contents');
+  await click(ui.queryAll('.fl-row')[0]);
+  assert.match(ui.query('.preview').textContent, /미리보기 실패: read denied/);
+  assert.doesNotMatch(ui.query('.preview').textContent, /beta contents/);
+  await click(ui.queryAll('.fl-row')[1]);
+  assert.match(ui.query('.preview').textContent, /미리보기 실패: IPC read failed/);
+});
+
+test('unmount invalidates pending reads and searches without issuing follow-up disk requests', async () => {
+  const read = deferred();
+  const result = deferred();
+  const stats = [];
+  const ui = await mountPane({
+    api: {
+      readDir: () => read.promise,
+      statfs: async (directory) => { stats.push(directory); return { ok: true, free: 1 }; },
+      search: () => result.promise,
+    },
+  });
+  await searchFor(ui, 'pending');
+  await ui.unmount();
+  await flush(() => {
+    read.resolve({ ok: true, entries: [file('late.txt')] });
+    result.reject(new Error('late search failure'));
+  });
+  assert.deepEqual(stats, []);
+  assert.equal(ui.container.isConnected, false);
+});

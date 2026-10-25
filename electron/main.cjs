@@ -297,13 +297,14 @@ ipcMain.handle('fs:reveal', async (_e, p) => {
 });
 
 ipcMain.handle('fs:readText', async (_e, p, maxBytes = 200 * 1024) => {
+  let fh;
   try {
-    const fh = await fsp.open(p, 'r');
+    fh = await fsp.open(p, 'r');
     const buf = Buffer.alloc(maxBytes);
     const { bytesRead } = await fh.read(buf, 0, maxBytes, 0);
-    await fh.close();
     return ok({ text: buf.slice(0, bytesRead).toString('utf8') });
   } catch (err) { return fail(err); }
+  finally { await fh?.close().catch(() => {}); }
 });
 
 ipcMain.handle('fs:statfs', async (_e, p) => {
@@ -410,50 +411,64 @@ ipcMain.handle('clipboard:writeText', (_e, text) => {
 });
 
 // Spotlight(mdfind) 검색: 파일 이름 + 내용, 인덱스 기반이라 즉시 응답
-ipcMain.handle('fs:searchSpotlight', async (_e, rootPath, query) => {
+ipcMain.handle('fs:searchSpotlight', async (_e, rootPath, query, opts = {}) => {
   try {
     const q = query.replace(/["\\]/g, '');
     const { stdout } = await execFileP('mdfind',
-      ['-onlyin', rootPath, `(kMDItemFSName == "*${q}*"cd) || (kMDItemTextContent == "${q}"cd)`],
+      ['-0', '-onlyin', rootPath, `(kMDItemFSName == "*${q}*"cd) || (kMDItemTextContent == "${q}"cd)`],
       { maxBuffer: 16 * 1024 * 1024 });
-    const lines = stdout.split('\n').filter(Boolean).slice(0, 500);
+    const all = stdout.split('\0').filter(Boolean).filter((p) => opts.showHidden || !hiddenWithin(rootPath, p));
+    const lines = all.slice(0, 500);
     const entries = (await Promise.all(
-      lines.map((p) => entryInfo(path.dirname(p), path.basename(p)))
+      lines.map(async (p) => {
+        const info = await entryInfo(path.dirname(p), path.basename(p));
+        return info && { ...info, hidden: hiddenWithin(rootPath, p) };
+      })
     )).filter(Boolean);
-    return ok({ entries });
+    return ok({ entries, truncated: all.length > 500 });
   } catch (err) { return fail(err); }
 });
 
 // Recursive search with limits
+function hiddenWithin(root, p) {
+  return path.relative(root, p).split(path.sep).some((part) => part.startsWith('.') && part !== '..');
+}
+
 ipcMain.handle('fs:search', async (_e, rootPath, query, opts = {}) => {
-  const maxResults = opts.maxResults || 500;
-  const maxDepth = opts.maxDepth || 8;
+  const maxResults = Math.max(1, Math.min(5000, opts.maxResults ?? 500));
+  const maxDepth = Math.max(0, Math.min(64, opts.maxDepth ?? 8));
   const q = query.toLowerCase();
   const results = [];
-  const skip = new Set(['node_modules', 'Library', '.git', '.Trash']);
+  const skip = new Set(['node_modules', 'Library']);
+  let truncated = false;
 
   async function walk(dir, depth) {
-    if (results.length >= maxResults || depth > maxDepth) return;
+    if (results.length >= maxResults || depth > maxDepth) { truncated = true; return; }
     let names;
-    try { names = await fsp.readdir(dir); } catch { return; }
+    try { names = await fsp.readdir(dir); } catch (err) {
+      if (depth === 0) throw err;
+      truncated = true;
+      return;
+    }
     for (const name of names) {
-      if (results.length >= maxResults) return;
-      if (name.startsWith('.')) continue;
+      if (results.length >= maxResults) { truncated = true; return; }
+      if (!opts.showHidden && name.startsWith('.')) continue;
       const full = path.join(dir, name);
       if (name.toLowerCase().includes(q)) {
         const info = await entryInfo(dir, name);
-        if (info) results.push(info);
+        if (info) results.push({ ...info, hidden: hiddenWithin(rootPath, full) });
       }
-      if (!skip.has(name)) {
-        let st;
-        try { st = await fsp.lstat(full); } catch { continue; }
-        if (st.isDirectory()) await walk(full, depth + 1);
+      let st;
+      try { st = await fsp.lstat(full); } catch { truncated = true; continue; }
+      if (st.isDirectory()) {
+        if (skip.has(name)) truncated = true;
+        else await walk(full, depth + 1);
       }
     }
   }
 
   try {
     await walk(rootPath, 0);
-    return ok({ entries: results });
+    return ok({ entries: results, truncated });
   } catch (err) { return fail(err); }
 });

@@ -10,13 +10,22 @@ import { acceptsDrop, startDrag, dropToDir, resolveConflictMode } from '../dnd.j
 import { recordOp } from '../undo.js';
 
 function Preview({ entry }) {
-  const [text, setText] = useState(null);
+  const [content, setContent] = useState(null);
   useEffect(() => {
-    setText(null);
+    let alive = true;
+    setContent(null);
     if (entry && isTextLike(entry)) {
-      window.api.readText(entry.path).then((r) => { if (r.ok) setText(r.text); });
+      (async () => {
+        try {
+          const result = await window.api.readText(entry.path);
+          if (alive) setContent({ path: entry.path, text: result.text, error: result.ok ? null : result.error || '파일을 읽을 수 없습니다.' });
+        } catch (error) {
+          if (alive) setContent({ path: entry.path, error: error.message || String(error) });
+        }
+      })();
     }
-  }, [entry?.path]);
+    return () => { alive = false; };
+  }, [entry?.path, entry?.mtime]);
 
   if (!entry) return <div className="preview empty">항목을 선택하면 미리보기가 표시됩니다</div>;
 
@@ -24,7 +33,12 @@ function Preview({ entry }) {
   if (isImage(entry)) body = <img src={localFileUrl(entry.path)} alt={entry.name} />;
   else if (isVideo(entry)) body = <video src={localFileUrl(entry.path)} controls />;
   else if (isAudio(entry)) body = <audio src={localFileUrl(entry.path)} controls />;
-  else if (isTextLike(entry)) body = <pre>{text ?? '불러오는 중…'}</pre>;
+  else if (isTextLike(entry)) {
+    const current = content?.path === entry.path ? content : null;
+    body = current?.error
+      ? <div className="fl-error" role="status">미리보기 실패: {current.error}</div>
+      : <pre>{current?.text ?? '불러오는 중…'}</pre>;
+  }
   else body = <div className="preview-bigicon">{fileIcon(entry)}</div>;
 
   return (
@@ -67,18 +81,63 @@ export default function Pane({
   const addressInputRef = useRef(null);
   const searchInputRef = useRef(null);
   const typeAheadRef = useRef({ s: '', t: 0 });
+  const mountedRef = useRef(true);
+  const currentPathRef = useRef(initialPath);
+  const loadGeneration = useRef(0);
+  const searchGeneration = useRef(0);
+  const currentSearch = useRef(null);
+  const showHiddenRef = useRef(showHidden);
+  showHiddenRef.current = showHidden;
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      loadGeneration.current += 1;
+      searchGeneration.current += 1;
+    };
+  }, []);
+
+  const clearSearch = useCallback((nextFilter = '') => {
+    searchGeneration.current += 1;
+    currentSearch.current = null;
+    setDeepSearch(null);
+    setFilter(nextFilter);
+  }, []);
+
+  const resetNavigation = useCallback((nextPath) => {
+    if (currentPathRef.current !== nextPath) {
+      // Invalidate synchronously, before React commits the new path/effects.
+      currentPathRef.current = nextPath;
+      loadGeneration.current += 1;
+      setEntries([]);
+      setError(null);
+      setDisk(null);
+    }
+    clearSearch();
+    setSelection(new Set());
+    anchorRef.current = -1;
+    setAddressEdit(false);
+    setAddressValue('');
+    setRenaming(null);
+    setMenu(null);
+  }, [clearSearch]);
 
   const navigate = useCallback((p) => {
+    resetNavigation(p);
     setHist((h) => {
       if (h.stack[h.idx] === p) return h;
       const stack = h.stack.slice(0, h.idx + 1).concat(p);
       return { stack, idx: stack.length - 1 };
     });
-    setSelection(new Set());
-    setFilter('');
-    setDeepSearch(null);
-    setAddressEdit(false);
-  }, []);
+  }, [resetNavigation]);
+
+  const moveHistory = useCallback((delta) => {
+    const idx = hist.idx + delta;
+    if (idx < 0 || idx >= hist.stack.length) return;
+    resetNavigation(hist.stack[idx]);
+    setHist((previous) => ({ ...previous, idx }));
+  }, [hist, resetNavigation]);
 
   useEffect(() => {
     registerNavigator(paneId, navigate);
@@ -87,11 +146,25 @@ export default function Pane({
   useEffect(() => { onPathChange(paneId, path); }, [paneId, path, onPathChange]);
 
   const load = useCallback(async () => {
-    const res = await window.api.readDir(path);
+    if (!mountedRef.current || path !== currentPathRef.current) return false;
+    const generation = ++loadGeneration.current;
+    const isCurrent = () => mountedRef.current && generation === loadGeneration.current && path === currentPathRef.current;
+    let res;
+    try {
+      res = await window.api.readDir(path);
+    } catch (error) {
+      res = { ok: false, error: error.message || String(error) };
+    }
+    if (!isCurrent()) return false;
     if (res.ok) { setEntries(res.entries); setError(null); }
     else { setEntries([]); setError(res.error); }
-    const d = await window.api.statfs(path);
-    if (d.ok) setDisk(d);
+    try {
+      const d = await window.api.statfs(path);
+      if (isCurrent()) setDisk(d.ok ? d : null);
+    } catch {
+      if (isCurrent()) setDisk(null);
+    }
+    return isCurrent() && res.ok;
   }, [path]);
 
   useEffect(() => { load(); }, [load]);
@@ -204,7 +277,7 @@ export default function Pane({
     const res = await window.api.mkdir(path, '새 폴더');
     if (res.ok) {
       recordOp({ type: 'create', path: res.path });
-      await load();
+      if (!await load()) return;
       setSelection(new Set([res.path]));
       setRenaming(res.path);
       setRenameValue(basename(res.path));
@@ -215,7 +288,7 @@ export default function Pane({
     const res = await window.api.newFile(path, '새 파일.txt');
     if (res.ok) {
       recordOp({ type: 'create', path: res.path });
-      await load();
+      if (!await load()) return;
       setSelection(new Set([res.path]));
       setRenaming(res.path);
       setRenameValue(basename(res.path));
@@ -236,21 +309,31 @@ export default function Pane({
     load();
   }, [load]);
 
-  const runDeepSearch = useCallback(async (query) => {
-    if (!query) { setDeepSearch(null); return; }
-    setDeepSearch({ query, results: [], searching: true });
-    const res = await window.api.search(path, query);
-    setDeepSearch({ query, results: res.ok ? res.entries : [], searching: false });
-  }, [path]);
+  const runSearch = useCallback(async (query, spotlight = false) => {
+    if (!query) { clearSearch(); return; }
+    const generation = ++searchGeneration.current;
+    const request = { query, spotlight, path: currentPathRef.current, showHidden: showHiddenRef.current };
+    currentSearch.current = request;
+    setDeepSearch({ query, spotlight, results: [], searching: true });
+    let result;
+    try {
+      const search = spotlight ? window.api.searchSpotlight : window.api.search;
+      result = await search(request.path, query, { showHidden: request.showHidden });
+    } catch (error) {
+      result = { ok: false, error: error.message || String(error) };
+    }
+    if (!mountedRef.current || generation !== searchGeneration.current
+      || request.path !== currentPathRef.current || request.showHidden !== showHiddenRef.current) return;
+    setDeepSearch({
+      query, spotlight, results: result.ok ? result.entries : [], searching: false,
+      truncated: !!result.truncated, error: result.ok ? null : result.error || '검색할 수 없습니다.',
+    });
+  }, [clearSearch]);
 
-  // Spotlight 인덱스 기반 검색 (이름 + 내용)
-  const runSpotlight = useCallback(async (query) => {
-    if (!query) { setDeepSearch(null); return; }
-    setDeepSearch({ query, results: [], searching: true, spotlight: true });
-    const res = await window.api.searchSpotlight(path, query);
-    if (!res.ok) alert(res.error);
-    setDeepSearch({ query, results: res.ok ? res.entries : [], searching: false, spotlight: true });
-  }, [path]);
+  useEffect(() => {
+    const request = currentSearch.current;
+    if (request && request.showHidden !== showHidden) runSearch(request.query, request.spotlight);
+  }, [showHidden, runSearch]);
 
   /* ---------- drag & drop ---------- */
 
@@ -385,7 +468,7 @@ export default function Pane({
     if (e.key === 'F2') { e.preventDefault(); startRename(); return; }
     if (e.key === 'Enter') { e.preventDefault(); selectedEntries[0] && openEntry(selectedEntries[0]); return; }
     if (e.key === ' ') { e.preventDefault(); setShowPreview((v) => !v); return; }
-    if (e.key === 'Escape') { setSelection(new Set()); setDeepSearch(null); setFilter(''); return; }
+    if (e.key === 'Escape') { setSelection(new Set()); clearSearch(); return; }
 
     // 타이핑 점프: 연속 입력(700ms)한 글자로 시작하는 항목을 선택
     if (!meta && !e.altKey && e.key.length === 1 && e.key !== ' ') {
@@ -424,7 +507,7 @@ export default function Pane({
       anchorRef.current = next;
       rootRef.current?.querySelector(`[data-idx="${next}"]`)?.scrollIntoView({ block: 'nearest' });
     }
-  }, [displayed, selection, selectedEntries, doCopy, doCut, doPaste, doTrash, startRename, openEntry, navigate, path, load, newFolder, view]);
+  }, [displayed, selection, selectedEntries, doCopy, doCut, doPaste, doTrash, startRename, openEntry, navigate, path, load, newFolder, view, clearSearch]);
 
   /* ---------- render ---------- */
 
@@ -504,10 +587,10 @@ export default function Pane({
     >
       <div className="toolbar">
         <button className="tb-btn" disabled={hist.idx === 0}
-          onClick={() => { setHist((h) => ({ ...h, idx: h.idx - 1 })); setSelection(new Set()); }}
+          onClick={() => moveHistory(-1)}
           title="뒤로">◀</button>
         <button className="tb-btn" disabled={hist.idx >= hist.stack.length - 1}
-          onClick={() => { setHist((h) => ({ ...h, idx: h.idx + 1 })); setSelection(new Set()); }}
+          onClick={() => moveHistory(1)}
           title="앞으로">▶</button>
         <button className="tb-btn" disabled={path === '/'}
           onClick={() => navigate(parentPath(path))} title="상위 폴더">▲</button>
@@ -552,14 +635,13 @@ export default function Pane({
           ref={searchInputRef}
           placeholder="검색 (Enter: 하위 폴더, ⌘Enter: Spotlight)"
           value={deepSearch ? deepSearch.query : filter}
-          onChange={(e) => { setDeepSearch(null); setFilter(e.target.value); }}
+          onChange={(e) => clearSearch(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === 'Enter') {
               const q = e.target.value.trim();
-              if (e.metaKey) runSpotlight(q);
-              else runDeepSearch(q);
+              runSearch(q, e.metaKey);
             }
-            if (e.key === 'Escape') { setFilter(''); setDeepSearch(null); e.target.blur(); }
+            if (e.key === 'Escape') { clearSearch(); e.target.blur(); }
           }}
         />
         <button
@@ -578,8 +660,10 @@ export default function Pane({
         <div className="search-banner">
           {deepSearch.searching
             ? `${deepSearch.spotlight ? 'Spotlight ' : ''}"${deepSearch.query}" 검색 중…`
-            : `${deepSearch.spotlight ? 'Spotlight ' : ''}"${deepSearch.query}" 검색 결과 ${deepSearch.results.length}개`}
-          <button onClick={() => { setDeepSearch(null); setFilter(''); }}>✕ 닫기</button>
+            : deepSearch.error
+              ? `검색 실패: ${deepSearch.error}`
+              : `${deepSearch.spotlight ? 'Spotlight ' : ''}"${deepSearch.query}" 검색 결과 ${deepSearch.results.length}개${deepSearch.truncated ? ' · 일부 결과만 표시됩니다' : ''}`}
+          <button onClick={() => clearSearch()}>✕ 닫기</button>
         </div>
       )}
 

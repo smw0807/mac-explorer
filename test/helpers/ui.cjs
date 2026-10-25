@@ -87,6 +87,7 @@ async function mountComponent(relativePath, { props = {}, api = {} } = {}) {
   document.body.append(container);
   const root = createRoot(container);
   let currentProps = props;
+  let mounted = true;
   await flush(() => root.render(React.createElement(Component, currentProps)));
 
   return {
@@ -105,6 +106,8 @@ async function mountComponent(relativePath, { props = {}, api = {} } = {}) {
       await flush(() => { for (const listener of listeners.copy) listener(payload); });
     },
     async unmount() {
+      if (!mounted) return;
+      mounted = false;
       await flush(() => root.unmount());
       container.remove();
     },

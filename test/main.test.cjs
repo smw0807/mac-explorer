@@ -37,3 +37,61 @@ for (const canceled of [false, true]) {
     assert.equal(await fsp.readFile(path.join(destDir, 'first'), 'utf8'), 'contents');
   });
 }
+
+test('recursive search respects hidden files and reports depth and result limits', async (t) => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'mac-explorer-search-'));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  await fsp.mkdir(path.join(root, '.config'));
+  await fsp.writeFile(path.join(root, '.env'), 'private');
+  await fsp.writeFile(path.join(root, '.config', 'settings.txt'), 'private');
+  await fsp.writeFile(path.join(root, 'visible.txt'), 'public');
+  const api = loadMain();
+  assert.deepEqual((await api.invoke('fs:search', root, 'env')).entries, []);
+  assert.equal((await api.invoke('fs:search', root, 'env', { showHidden: true })).entries[0].name, '.env');
+  const nested = await api.invoke('fs:search', root, 'settings', { showHidden: true });
+  assert.equal(nested.entries[0].name, 'settings.txt');
+  assert.equal(nested.entries[0].hidden, true);
+  assert.equal(nested.truncated, false);
+  const shallow = await api.invoke('fs:search', root, 'settings', { showHidden: true, maxDepth: 0 });
+  assert.equal(shallow.entries.length, 0);
+  assert.equal(shallow.truncated, true);
+  const limited = await api.invoke('fs:search', root, '', { showHidden: true, maxResults: 1 });
+  assert.equal(limited.entries.length, 1);
+  assert.equal(limited.truncated, true);
+  assert.equal((await api.invoke('fs:search', path.join(root, 'missing'), 'x')).ok, false);
+});
+
+test('Spotlight handles newline filenames and filters hidden ancestors', async () => {
+  let args;
+  const api = loadMain({ overrides: {
+    child_process: { execFile: (_command, input, _options, callback) => {
+      args = input;
+      callback(null, { stdout: '/search/.config/settings.txt\0/search/line\nbreak.txt\0' });
+    } },
+    'fs/promises': { ...fsp,
+      lstat: async () => ({ isDirectory: () => false, isSymbolicLink: () => false, size: 1, mtimeMs: 0 }),
+    },
+  } });
+  const result = await api.invoke('fs:searchSpotlight', '/search', 'txt');
+  assert.equal(result.ok, true);
+  assert.equal(args[0], '-0');
+  assert.deepEqual(result.entries.map((entry) => entry.path), ['/search/line\nbreak.txt']);
+  const withHidden = await api.invoke('fs:searchSpotlight', '/search', 'txt', { showHidden: true });
+  assert.equal(withHidden.entries.length, 2);
+  assert.equal(withHidden.entries[0].hidden, true);
+});
+
+test('text preview closes its descriptor even when reading fails', async () => {
+  let closed = 0;
+  const api = loadMain({ overrides: { 'fs/promises': {
+    ...fsp,
+    open: async () => ({
+      read: async () => { throw new Error('read failed'); },
+      close: async () => { closed++; },
+    }),
+  } } });
+  const result = await api.invoke('fs:readText', '/preview.txt');
+  assert.equal(result.ok, false);
+  assert.equal(result.error, 'read failed');
+  assert.equal(closed, 1);
+});
