@@ -64,7 +64,14 @@ app.on('browser-window-created', (_event, win) => {
     const method = mode === 'move' ? 'move' : 'copyStart';
     try {
       await win.webContents.executeJavaScript(`window.api.${method}([${JSON.stringify(source)}], ${JSON.stringify(directory)}, {conflict: 'overwrite'})`);
-    } catch (error) { console.error(error); app.exit(1); }
+    } catch (error) {
+      // The main process drains the mutation, then quits. Chromium can dispose
+      // this executeJavaScript request before delivering its already-completed
+      // IPC result; the will-quit handler still verifies the filesystem outcome.
+      if (quitRequested && /Render frame was disposed before the request completed/.test(error.message)) return;
+      console.error(error);
+      app.exit(1);
+    }
   });
 });
 require('../electron/main.cjs');
