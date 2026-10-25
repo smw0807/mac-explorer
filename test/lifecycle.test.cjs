@@ -46,7 +46,7 @@ for (const [channel, args] of mutations) {
         copyItem: operation,
         moveItem: operation,
       },
-      './archive.cjs': { compress: operation },
+      './archive.cjs': { compress: operation, extract: operation },
       'fs/promises': { ...fsp, mkdir: operation, writeFile: operation },
       child_process: { execFile: (_command, _args, callback) => { operation().then(() => callback(null, '')); } },
     } });

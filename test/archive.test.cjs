@@ -173,6 +173,59 @@ test('a failed zip command removes only its own partial archive workspace', asyn
   assert.deepEqual((await fsp.readdir(root)).sort(), ['item.txt', 'item.txt.zip']);
 });
 
+zipTest('a successful zip command cannot publish an archive with damaged contents', async (t) => {
+  const root = await fixture(t);
+  const source = path.join(root, 'item.txt');
+  const existing = source + '.zip';
+  await fsp.writeFile(source, 'intact source contents');
+  await fsp.writeFile(existing, 'existing archive');
+  let staged;
+  const isolated = loadArchive({ child_process: {
+    execFile(command, args, options, callback) {
+      return execFile(command, args, options, (err, stdout, stderr) => {
+        if (err || command !== '/usr/bin/zip') return callback(err, stdout, stderr);
+        staged = args[args.indexOf('--') - 1];
+        (async () => {
+          const bytes = await fsp.readFile(staged);
+          const dataOffset = 30 + bytes.readUInt16LE(26) + bytes.readUInt16LE(28);
+          bytes[dataOffset] ^= 1;
+          await fsp.writeFile(staged, bytes);
+        })().then(() => callback(null, stdout, stderr), callback);
+      });
+    },
+  } });
+  await assert.rejects(isolated.compress([source]), { code: 'INVALID_ARCHIVE' });
+  await assert.rejects(fsp.lstat(path.dirname(staged)), { code: 'ENOENT' });
+  assert.equal(await fsp.readFile(existing, 'utf8'), 'existing archive');
+  assert.equal(await fsp.readFile(source, 'utf8'), 'intact source contents');
+  assert.deepEqual((await fsp.readdir(root)).sort(), ['item.txt', 'item.txt.zip']);
+});
+
+zipTest('compression refuses a source changed while zip was reading it', async (t) => {
+  const root = await fixture(t);
+  const folder = path.join(root, 'folder');
+  const source = path.join(folder, 'item.txt');
+  await fsp.mkdir(folder);
+  await fsp.writeFile(source, 'before compression');
+  let staged;
+  const isolated = loadArchive({ child_process: {
+    execFile(command, args, options, callback) {
+      return execFile(command, args, options, (err, stdout, stderr) => {
+        if (err || command !== '/usr/bin/zip') return callback(err, stdout, stderr);
+        staged = args[args.indexOf('--') - 1];
+        // This leaves the ZIP valid; only the source comparison can detect the race.
+        fsp.writeFile(source, 'changed during compression').then(
+          () => callback(null, stdout, stderr), callback,
+        );
+      });
+    },
+  } });
+  await assert.rejects(isolated.compress([folder]), { code: 'FS_CHANGED' });
+  await assert.rejects(fsp.lstat(path.dirname(staged)), { code: 'ENOENT' });
+  assert.equal(await fsp.readFile(source, 'utf8'), 'changed during compression');
+  assert.deepEqual(await fsp.readdir(root), ['folder']);
+});
+
 test('missing inputs fail without creating an incomplete archive', async (t) => {
   const root = await fixture(t);
   const source = path.join(root, 'item.txt');

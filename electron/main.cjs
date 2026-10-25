@@ -8,7 +8,7 @@ const { execFile } = require('child_process');
 const { promisify } = require('util');
 const execFileP = promisify(execFile);
 const { statEntry, uniqueDest, copyItem, moveItem, treeSize, cancelError, validateBatch } = require('./file-operations.cjs');
-const { compress } = require('./archive.cjs');
+const { compress, extract } = require('./archive.cjs');
 const { absolutePath, validateArguments, validateSender } = require('./ipc-validation.cjs');
 const { readSettings, writeSettings } = require('./settings.cjs');
 const { createOperationLifecycle } = require('./operation-lifecycle.cjs');
@@ -397,9 +397,7 @@ handle('fs:compress', async (_e, paths) => {
 
 handle('fs:extract', async (_e, zipPath) => {
   try {
-    const dest = await uniqueDest(path.dirname(zipPath), path.basename(zipPath).replace(/\.zip$/i, ''));
-    await execFileP('/usr/bin/ditto', ['-x', '-k', zipPath, dest]);
-    return ok({ path: dest });
+    return ok({ path: await extract(zipPath) });
   } catch (err) { return fail(err); }
 });
 
