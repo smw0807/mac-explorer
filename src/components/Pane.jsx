@@ -9,6 +9,19 @@ import {
 import { acceptsDrop, startDrag, dropToDir, notifyFsChanged, resolveConflictMode } from '../dnd.js';
 import { recordOp } from '../undo.js';
 
+function pathsRelated(first, second) {
+  const a = first.replace(/\/+$/, '') || '/';
+  const b = second.replace(/\/+$/, '') || '/';
+  return a === b || a === '/' || b === '/' || a.startsWith(b + '/') || b.startsWith(a + '/');
+}
+
+function changedDirectories(result, sources = []) {
+  const outputs = [result.path, ...(result.undo || []).map((item) => item.path)]
+    .filter((value) => typeof value === 'string');
+  if (!result.ok && !outputs.length) return [];
+  return [...new Set([...sources, ...outputs].map(parentPath))];
+}
+
 function Preview({ entry }) {
   const [content, setContent] = useState(null);
   const previewPath = entry?.path;
@@ -94,6 +107,8 @@ export default function Pane({
   const renameSessionRef = useRef(null);
   const batchSessionRef = useRef(null);
   const currentSearch = useRef(null);
+  const searchInFlight = useRef(null);
+  const searchRefreshTimer = useRef(null);
   const showHiddenRef = useRef(showHidden);
   showHiddenRef.current = showHidden;
 
@@ -107,11 +122,14 @@ export default function Pane({
       addressGeneration.current += 1;
       renameSessionRef.current = null;
       batchSessionRef.current = null;
+      clearTimeout(searchRefreshTimer.current);
     };
   }, []);
 
   const clearSearch = useCallback((nextFilter = '') => {
     searchGeneration.current += 1;
+    clearTimeout(searchRefreshTimer.current);
+    searchRefreshTimer.current = null;
     currentSearch.current = null;
     setDeepSearch(null);
     setFilter(nextFilter);
@@ -214,14 +232,65 @@ export default function Pane({
 
   useEffect(() => { load(); }, [load]);
 
+  const runSearch = useCallback(async (query, spotlight = false, preserveResults = false) => {
+    if (!query) { clearSearch(); return; }
+    clearTimeout(searchRefreshTimer.current);
+    searchRefreshTimer.current = null;
+    const generation = ++searchGeneration.current;
+    const previous = currentSearch.current;
+    const request = { query, spotlight, path: currentPathRef.current, showHidden: showHiddenRef.current };
+    const sameSearch = preserveResults && previous?.query === query && previous.spotlight === spotlight
+      && previous.path === request.path && previous.showHidden === request.showHidden;
+    currentSearch.current = request;
+    setDeepSearch((current) => ({
+      query, spotlight, results: sameSearch && current ? current.results : [], searching: true,
+    }));
+    const pending = Promise.resolve().then(() => {
+      const search = spotlight ? window.api.searchSpotlight : window.api.search;
+      return search(request.path, query, { showHidden: request.showHidden });
+    }).catch((error) => ({ ok: false, error: error.message || String(error) }));
+    searchInFlight.current = pending;
+    const result = await pending;
+    if (searchInFlight.current === pending) searchInFlight.current = null;
+    if (!mountedRef.current || generation !== searchGeneration.current
+      || request.path !== currentPathRef.current || request.showHidden !== showHiddenRef.current) return;
+    setDeepSearch({
+      query, spotlight, results: result.ok ? result.entries : [], searching: false,
+      truncated: !!result.truncated, error: result.ok ? null : result.error || '검색할 수 없습니다.',
+    });
+  }, [clearSearch]);
+
+  const scheduleSearchRefresh = useCallback(() => {
+    const request = currentSearch.current;
+    if (!request || !mountedRef.current) return;
+    // Invalidate immediately, but coalesce watcher bursts and wait for an existing search.
+    const generation = ++searchGeneration.current;
+    clearTimeout(searchRefreshTimer.current);
+    searchRefreshTimer.current = setTimeout(async () => {
+      searchRefreshTimer.current = null;
+      if (searchInFlight.current) await searchInFlight.current;
+      if (!mountedRef.current || generation !== searchGeneration.current
+        || currentSearch.current !== request || request.path !== currentPathRef.current) return;
+      runSearch(request.query, request.spotlight, true);
+    }, 100);
+  }, [runSearch]);
+
+  useEffect(() => {
+    const request = currentSearch.current;
+    if (request && request.showHidden !== showHidden) runSearch(request.query, request.spotlight);
+  }, [showHidden, runSearch]);
+
   // 다른 패널/사이드바에서 일어난 파일 작업 반영
   useEffect(() => {
     function onChanged(e) {
+      if (!mountedRef.current || path !== currentPathRef.current) return;
       if (e.detail.dirs.includes(path)) load();
+      const request = currentSearch.current;
+      if (request && e.detail.dirs.some((dir) => pathsRelated(request.path, dir))) scheduleSearchRefresh();
     }
     window.addEventListener('mx-fs-changed', onChanged);
     return () => window.removeEventListener('mx-fs-changed', onChanged);
-  }, [path, load]);
+  }, [path, load, scheduleSearchRefresh]);
 
   const startWatching = useCallback(async () => {
     if (!mountedRef.current || path !== currentPathRef.current) return;
@@ -239,11 +308,16 @@ export default function Pane({
   // Subscribe before starting the watcher so an immediate failure is not missed.
   useEffect(() => {
     const off = window.api.onDirChanged(({ paneId: id, dir, error }) => {
-      if (!mountedRef.current || id !== paneId || dir !== path || path !== currentPathRef.current) return;
+      if (!mountedRef.current || path !== currentPathRef.current) return;
       if (error != null) {
+        if (id !== paneId || dir !== path) return;
         watchGeneration.current += 1;
         setWatchError(error || '폴더 감시가 중단되었습니다.');
-      } else load();
+      } else {
+        if (id === paneId && dir === path) load();
+        const request = currentSearch.current;
+        if (request && pathsRelated(request.path, dir)) scheduleSearchRefresh();
+      }
     });
     startWatching();
     return () => {
@@ -251,12 +325,14 @@ export default function Pane({
       off();
       window.api.unwatchDir(paneId);
     };
-  }, [paneId, path, load, startWatching]);
+  }, [paneId, path, load, startWatching, scheduleSearchRefresh]);
 
   const refresh = useCallback(() => {
     load();
+    const request = currentSearch.current;
+    if (request) runSearch(request.query, request.spotlight, true);
     if (watchError) startWatching();
-  }, [load, watchError, startWatching]);
+  }, [load, watchError, startWatching, runSearch]);
 
   const displayed = useMemo(() => {
     let base = deepSearch ? deepSearch.results : entries;
@@ -362,6 +438,8 @@ export default function Pane({
       if (value && value !== oldName) {
         const res = await window.api.rename(session.path, value);
         recordOp({ type: 'rename', undo: res.undo });
+        const dirs = changedDirectories(res, [session.path]);
+        if (dirs.length) notifyFsChanged(dirs);
         if (!res.ok) throw new Error(res.error);
       }
     } catch (error) {
@@ -392,8 +470,10 @@ export default function Pane({
   const newFolder = useCallback(async () => {
     const res = await window.api.mkdir(path, '새 폴더');
     recordOp({ type: 'create', undo: res.undo });
+    if (res.ok) await load();
+    const dirs = changedDirectories(res);
+    if (dirs.length) notifyFsChanged(dirs);
     if (res.ok) {
-      await load();
       if (!mountedRef.current || path !== currentPathRef.current) return;
       setSelection(new Set([res.path]));
       beginRename(res.path, basename(res.path));
@@ -403,8 +483,10 @@ export default function Pane({
   const newFile = useCallback(async () => {
     const res = await window.api.newFile(path, '새 파일.txt');
     recordOp({ type: 'create', undo: res.undo });
+    if (res.ok) await load();
+    const dirs = changedDirectories(res);
+    if (dirs.length) notifyFsChanged(dirs);
     if (res.ok) {
-      await load();
       if (!mountedRef.current || path !== currentPathRef.current) return;
       setSelection(new Set([res.path]));
       beginRename(res.path, basename(res.path));
@@ -413,11 +495,13 @@ export default function Pane({
 
   const applyBatchRename = useCallback(async (renames, session) => {
     const undo = [];
+    const dirs = new Set();
     try {
       for (const { from, to } of renames) {
         if (basename(from) === to) continue;
         const res = await window.api.rename(from, to);
         undo.push(...(res.undo || []));
+        changedDirectories(res, [from]).forEach((dir) => dirs.add(dir));
         if (!res.ok) throw new Error(res.error);
       }
     } catch (error) {
@@ -425,6 +509,7 @@ export default function Pane({
     } finally {
       // Keep completed tokens even if a later IPC request rejects or the pane closes.
       recordOp({ type: 'renameBatch', undo });
+      if (dirs.size) notifyFsChanged([...dirs]);
       if (mountedRef.current && batchSessionRef.current === session) {
         batchSessionRef.current = null;
         setBatchRename(null);
@@ -433,32 +518,6 @@ export default function Pane({
       }
     }
   }, [load]);
-
-  const runSearch = useCallback(async (query, spotlight = false) => {
-    if (!query) { clearSearch(); return; }
-    const generation = ++searchGeneration.current;
-    const request = { query, spotlight, path: currentPathRef.current, showHidden: showHiddenRef.current };
-    currentSearch.current = request;
-    setDeepSearch({ query, spotlight, results: [], searching: true });
-    let result;
-    try {
-      const search = spotlight ? window.api.searchSpotlight : window.api.search;
-      result = await search(request.path, query, { showHidden: request.showHidden });
-    } catch (error) {
-      result = { ok: false, error: error.message || String(error) };
-    }
-    if (!mountedRef.current || generation !== searchGeneration.current
-      || request.path !== currentPathRef.current || request.showHidden !== showHiddenRef.current) return;
-    setDeepSearch({
-      query, spotlight, results: result.ok ? result.entries : [], searching: false,
-      truncated: !!result.truncated, error: result.ok ? null : result.error || '검색할 수 없습니다.',
-    });
-  }, [clearSearch]);
-
-  useEffect(() => {
-    const request = currentSearch.current;
-    if (request && request.showHidden !== showHidden) runSearch(request.query, request.spotlight);
-  }, [showHidden, runSearch]);
 
   /* ---------- drag & drop ---------- */
 
@@ -532,12 +591,16 @@ export default function Pane({
         { label: '압축하기', onClick: async () => {
             const res = await window.api.compress([...sel]);
             recordOp({ type: 'create', undo: res.undo });
+            const dirs = changedDirectories(res);
+            if (dirs.length) notifyFsChanged(dirs);
             if (!res.ok) alert(res.error);
             load();
           } },
         ...(!multi && entry.ext === 'zip' ? [{ label: '압축 해제', onClick: async () => {
             const res = await window.api.extract(entry.path);
             recordOp({ type: 'create', undo: res.undo });
+            const dirs = changedDirectories(res);
+            if (dirs.length) notifyFsChanged(dirs);
             if (!res.ok) alert(res.error);
             load();
           } }] : []),

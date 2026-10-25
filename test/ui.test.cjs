@@ -90,6 +90,14 @@ test('deleting an ordinary visible selection still trashes exactly that file', a
 const visiblePane = (ui) => ui.query('.panes:not([hidden]) .pane');
 const undoEntry = (token, path = '/test/result') => ({ path, token });
 
+function captureChanges(t) {
+  const changes = [];
+  const onChanged = (event) => changes.push(event.detail.dirs);
+  window.addEventListener('mx-fs-changed', onChanged);
+  t.after(() => window.removeEventListener('mx-fs-changed', onChanged));
+  return changes;
+}
+
 async function copySelectedFile(ui) {
   await click(visiblePane(ui).querySelector('.fl-row'));
   await key(visiblePane(ui), 'c', { metaKey: true });
@@ -251,6 +259,7 @@ test('failed copy completion records only its backend tokens and tokenless compl
 });
 
 test('inline rename records the backend token without constructing an inverse rename', async (t) => {
+  const changes = captureChanges(t);
   const renamed = [];
   const undone = [];
   const ui = await mountApp({ entries: [file('old.txt')], api: {
@@ -265,12 +274,14 @@ test('inline rename records the backend token without constructing an inverse re
   await key(visiblePane(ui), 'F2');
   await changeValue(ui.query('.rename-input'), 'new.txt');
   await key(ui.query('.rename-input'), 'Enter');
+  assert.deepEqual(changes, [['/test']]);
   await key(visiblePane(ui), 'z', { metaKey: true });
   assert.deepEqual(renamed, [['/test/old.txt', 'new.txt']]);
   assert.deepEqual(undone, ['inline-rename']);
 });
 
 test('partially successful batch rename combines its tokens into one reverse-order undo', async (t) => {
+  const changes = captureChanges(t);
   const renamed = [];
   const undone = [];
   const ui = await mountApp({ entries: ['a', 'b', 'c'].map((name) => file(`old-${name}.txt`)), api: {
@@ -289,6 +300,7 @@ test('partially successful batch rename combines its tokens into one reverse-ord
   await changeValue(ui.queryAll('.modal-fields input')[1], 'new');
   await click(ui.query('.modal-actions .primary'));
   assert.match(ui.alerts[0], /c is busy/);
+  assert.deepEqual(changes, [['/test']]);
   await key(visiblePane(ui), 'z', { metaKey: true });
   assert.deepEqual(undone, ['batch-new-b.txt', 'batch-new-a.txt']);
   await key(visiblePane(ui), 'z', { metaKey: true });
@@ -298,6 +310,7 @@ test('partially successful batch rename combines its tokens into one reverse-ord
 
 for (const operation of ['mkdir', 'newFile', 'compress', 'extract']) {
   test(`${operation} forwards its creation token to application undo`, async (t) => {
+    const changes = captureChanges(t);
     const undone = [];
     const created = file('created-result', { isDir: operation === 'mkdir' || operation === 'extract' });
     let entries = operation === 'compress' || operation === 'extract' ? [file('source.zip')] : [];
@@ -318,6 +331,7 @@ for (const operation of ['mkdir', 'newFile', 'compress', 'extract']) {
       const label = { newFile: '새 파일', compress: '압축하기', extract: '압축 해제' }[operation];
       await click(ui.queryAll('.cm-item').find((node) => node.textContent === label));
     }
+    assert.deepEqual(changes, [['/test']]);
     if (ui.query('.rename-input')) await key(ui.query('.rename-input'), 'Escape');
     await key(visiblePane(ui), 'z', { metaKey: true });
     assert.deepEqual(undone, [`created-by-${operation}`]);
@@ -998,4 +1012,174 @@ test('the newest address submission wins and current lookup errors remain visibl
   await key(ui.query('.address-input'), 'Enter');
   assert.match(ui.alerts[0], /address IPC unavailable/);
   assert.equal(ui.query('.address-input').value, '/failure');
+});
+
+async function emitChanges(dirs) {
+  await flush(() => window.dispatchEvent(new CustomEvent('mx-fs-changed', { detail: { dirs } })));
+}
+
+async function advanceRefresh(t, milliseconds = 100) {
+  await flush(() => t.mock.timers.tick(milliseconds));
+}
+
+for (const spotlight of [false, true]) {
+  test(`manual refresh immediately reruns the active ${spotlight ? 'Spotlight' : 'recursive'} query while preserving its rows and selection`, async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const pending = deferred();
+    const calls = [];
+    const search = (...args) => {
+      calls.push(args);
+      return calls.length === 1 ? Promise.resolve({ ok: true, entries: [file('old-result.txt')] }) : pending.promise;
+    };
+    const ui = await mountPane({ props: { showHidden: true }, api: { search, searchSpotlight: search } });
+    t.after(() => ui.unmount());
+    await searchFor(ui, 'result', spotlight);
+    await click(ui.query('.fl-row'));
+    await click(ui.query('[title="새로 고침"]'));
+    assert.deepEqual(calls, [
+      ['/test', 'result', { showHidden: true }], ['/test', 'result', { showHidden: true }],
+    ]);
+    assert.deepEqual(displayedNames(ui), ['old-result.txt']);
+    assert.match(ui.query('.statusbar').textContent, /1개 선택됨/);
+    assert.match(ui.query('.search-banner').textContent, /검색 중/);
+    await flush(() => pending.resolve({ ok: true, entries: [file('new-result.txt')] }));
+    assert.deepEqual(displayedNames(ui), ['new-result.txt']);
+    assert.equal(ui.query('.search-banner').textContent.includes('Spotlight'), spotlight);
+  });
+}
+
+test('watcher and operation notifications coalesce related search changes without overlapping automatic searches', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const firstRefresh = deferred();
+  const secondRefresh = deferred();
+  let calls = 0;
+  const ui = await mountPane({ props: { initialPath: '/test/sub' }, api: {
+    search: () => {
+      calls++;
+      if (calls === 1) return Promise.resolve({ ok: true, entries: [file('original.txt')] });
+      return calls === 2 ? firstRefresh.promise : secondRefresh.promise;
+    },
+  } });
+  t.after(() => ui.unmount());
+  await searchFor(ui, 'result');
+  await emitChanges(['/test/submarine', '/elsewhere']);
+  await ui.emitDirectory({ paneId: 'another-pane', dir: '/unrelated' });
+  await advanceRefresh(t);
+  assert.equal(calls, 1, 'shared prefixes and unrelated directories do not refresh this search');
+  await emitChanges(['/test']);
+  await emitChanges(['/test/sub/deep']);
+  await ui.emitDirectory({ paneId: 'another-pane', dir: '/test/sub' });
+  await advanceRefresh(t, 99);
+  assert.equal(calls, 1);
+  await advanceRefresh(t, 1);
+  assert.equal(calls, 2, 'one search handles the burst from both notification sources');
+  await ui.emitDirectory({ paneId: 'test-pane', dir: '/test/sub' });
+  await emitChanges(['/']);
+  await advanceRefresh(t);
+  assert.equal(calls, 2, 'an automatic refresh waits for the already running search');
+  await flush(() => firstRefresh.resolve({ ok: true, entries: [file('stale-refresh.txt')] }));
+  assert.equal(calls, 3);
+  assert.deepEqual(displayedNames(ui), ['original.txt'], 'the invalidated response cannot replace retained results');
+  await flush(() => secondRefresh.resolve({ ok: true, entries: [file('current-refresh.txt')] }));
+  assert.deepEqual(displayedNames(ui), ['current-refresh.txt']);
+});
+
+test('a search rooted at slash refreshes after a descendant change', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const calls = [];
+  const ui = await mountPane({ props: { initialPath: '/' }, api: {
+    searchSpotlight: async (...args) => { calls.push(args); return { ok: true, entries: [] }; },
+  } });
+  t.after(() => ui.unmount());
+  await searchFor(ui, 'volume', true);
+  await emitChanges(['/Volumes/External/folder']);
+  await advanceRefresh(t);
+  assert.deepEqual(calls, [['/', 'volume', { showHidden: false }], ['/', 'volume', { showHidden: false }]]);
+});
+
+test('manual refresh supersedes a queued automatic refresh and its late response stays canceled', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const pending = deferred();
+  let calls = 0;
+  const ui = await mountPane({ entries: [file('base.txt')], api: {
+    search: () => ++calls === 1 ? Promise.resolve({ ok: true, entries: [file('old-result.txt')] }) : pending.promise,
+  } });
+  t.after(() => ui.unmount());
+  await searchFor(ui, 'result');
+  await emitChanges(['/test/child']);
+  await advanceRefresh(t, 50);
+  await key(ui.query('.pane'), 'r', { metaKey: true });
+  assert.equal(calls, 2);
+  await advanceRefresh(t);
+  assert.equal(calls, 2);
+  await click(ui.query('.search-banner button'));
+  await flush(() => pending.resolve({ ok: true, entries: [file('late-result.txt')] }));
+  assert.equal(ui.query('.search-banner'), null);
+  assert.deepEqual(displayedNames(ui), ['base.txt']);
+});
+
+for (const cancellation of ['close search', 'edit query', 'navigate', 'unmount']) {
+  test(`a queued search refresh cannot restart after ${cancellation}`, async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    let calls = 0;
+    const ui = await mountPane({ api: {
+      search: async () => { calls++; return { ok: true, entries: [file('result.txt')] }; },
+    } });
+    t.after(() => ui.unmount());
+    await searchFor(ui, 'result');
+    await emitChanges(['/test']);
+    if (cancellation === 'close search') await click(ui.query('.search-banner button'));
+    if (cancellation === 'edit query') await changeValue(ui.query('.search-input'), 'new query');
+    if (cancellation === 'navigate') await click(ui.query('[title="상위 폴더"]'));
+    if (cancellation === 'unmount') await ui.unmount();
+    await advanceRefresh(t);
+    assert.equal(calls, 1);
+    assert.equal(ui.query('.search-banner'), null);
+  });
+}
+
+test('deleting and renaming nested search results refreshes the active search from successful file changes', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let matches = [file('match.txt', { path: '/test/nested/match.txt' })];
+  const calls = [];
+  const ui = await mountPane({ api: {
+    search: async (...args) => { calls.push(args); return { ok: true, entries: matches }; },
+    rename: async (_from, name) => {
+      matches = [file(name, { path: `/test/nested/${name}` })];
+      return { ok: true, path: matches[0].path, undo: [undoEntry('nested-rename', matches[0].path)] };
+    },
+    trash: async (paths) => { matches = []; return { ok: true, trashed: paths }; },
+  } });
+  t.after(() => ui.unmount());
+  await searchFor(ui, 'match');
+  await click(ui.query('.fl-row'));
+  await key(ui.query('.pane'), 'F2');
+  await changeValue(ui.query('.rename-input'), 'match-renamed.txt');
+  await key(ui.query('.rename-input'), 'Enter');
+  await advanceRefresh(t);
+  assert.deepEqual(displayedNames(ui), ['match-renamed.txt']);
+  await click(ui.query('.fl-row'));
+  await key(ui.query('.pane'), 'Delete');
+  await advanceRefresh(t);
+  assert.deepEqual(displayedNames(ui), []);
+  assert.equal(calls.length, 3);
+  assert.match(ui.query('.search-banner').textContent, /검색 결과 0개/);
+});
+
+test('creating a file refreshes another pane displaying the same folder', async (t) => {
+  let entries = [];
+  const ui = await mountApp({ api: {
+    readDir: async () => ({ ok: true, entries }),
+    newFile: async () => {
+      entries = [file('created.txt')];
+      return { ok: true, path: '/test/created.txt', undo: [undoEntry('created', '/test/created.txt')] };
+    },
+  } });
+  t.after(() => ui.unmount());
+  await click(ui.query('[title="듀얼 패널 (⇧⌘D)"]'));
+  const [first, second] = ui.queryAll('.pane');
+  await flush(() => first.querySelector('.filelist').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true })));
+  await click(ui.queryAll('.cm-item').find((node) => node.textContent === '새 파일'));
+  assert.equal(first.querySelectorAll('.fl-row').length, 1);
+  assert.equal(second.querySelector('.fl-name').textContent, 'created.txt');
 });

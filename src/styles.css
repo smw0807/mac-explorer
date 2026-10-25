@@ -98,6 +98,8 @@ html, body, #root {
 .tree-icon { flex-shrink: 0; font-size: 12px; }
 .tree-name { overflow: hidden; text-overflow: ellipsis; }
 .tree-loading { color: var(--text-dim); font-size: 11px; padding: 2px 6px; }
+.tree-error { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.tree-retry { border: none; background: none; color: var(--text); cursor: pointer; font-size: inherit; text-decoration: underline; padding: 0; }
 
 /* ---------- pane ---------- */
 .pane {
