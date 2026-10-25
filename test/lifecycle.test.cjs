@@ -25,6 +25,7 @@ const mutations = [
   ['fs:newFile', ['/parent', 'new-file']],
   ['fs:compress', [['/source']]],
   ['fs:extract', ['/source.zip']],
+  ['fs:undo', ['owned-token']],
 ];
 
 for (const [channel, args] of mutations) {
@@ -45,7 +46,12 @@ for (const [channel, args] of mutations) {
         uniqueDest: async (dir, name) => path.join(dir, name),
         copyItem: operation,
         moveItem: operation,
+        createItem: operation,
       },
+      './undo-registry.cjs': { createUndoRegistry: () => ({
+        recordCreate: () => null, recordMove: () => null, restored() {}, release() {},
+        undo: async () => { await operation(); return { ok: true, dirs: [] }; },
+      }) },
       './archive.cjs': { compress: operation, extract: operation },
       'fs/promises': { ...fsp, mkdir: operation, writeFile: operation },
       child_process: { execFile: (_command, _args, callback) => { operation().then(() => callback(null, '')); } },

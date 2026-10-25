@@ -73,7 +73,7 @@ async function createWorkspace(sources, cwd, outputDir) {
     + (lastError ? ` ${lastError.message}` : ''));
 }
 
-async function compress(paths) {
+async function compress(paths, { onCommitted } = {}) {
   if (!Array.isArray(paths) || paths.length === 0
     || paths.some((source) => typeof source !== 'string' || source.length === 0)) {
     throw new Error('압축할 항목을 선택해주세요.');
@@ -104,7 +104,7 @@ async function compress(paths) {
       commandOptions({ cwd }));
     await validateArchive(staged);
     for (const source of sources) await assertSnapshot(source.path, source.snapshot);
-    installed = await moveItem(staged, outputDir, { conflict: 'keepBoth' });
+    installed = await moveItem(staged, outputDir, { conflict: 'keepBoth', onCommitted });
     return installed;
   } catch (err) {
     failure = err;
@@ -114,7 +114,7 @@ async function compress(paths) {
   }
 }
 
-async function extract(zipPath) {
+async function extract(zipPath, { onCommitted } = {}) {
   const input = path.resolve(zipPath);
   const source = await fsp.realpath(input);
   const original = await captureSnapshot(source);
@@ -148,7 +148,7 @@ async function extract(zipPath) {
     await execFileP('/usr/bin/ditto', ['-x', '-k', '--qtn', archive, payload], commandOptions());
     if (!(await fsp.lstat(payload)).isDirectory()) throw new Error('압축 해제 결과 폴더를 확인할 수 없습니다.');
     await assertOriginal();
-    installed = await moveItem(payload, outputDir, { name, conflict: 'keepBoth' });
+    installed = await moveItem(payload, outputDir, { name, conflict: 'keepBoth', onCommitted });
     return installed;
   } catch (err) {
     failure = err;

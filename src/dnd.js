@@ -54,10 +54,7 @@ export async function dropToDir(e, destDir) {
   const res = copyMode
     ? await window.api.copy(paths, destDir, opts)
     : await window.api.move(paths, destDir, opts);
-  const recoverySources = new Set((res.recovery || []).map((item) => item.from));
-  const moved = (res.items || []).filter((item) => !recoverySources.has(item.from));
-  if (copyMode && res.created?.length) recordOp({ type: 'copy', created: res.created });
-  else if (!copyMode && moved.length) recordOp({ type: 'move', items: moved });
+  recordOp({ type: copyMode ? 'copy' : 'move', undo: res.undo });
   if (!res.ok) alert(res.error);
   notifyFsChanged([...new Set([destDir, ...paths.map(parentPath)])]);
 }

@@ -33,6 +33,8 @@ for (const canceled of [false, true]) {
     assert.equal(terminal.jobId, start.jobId);
     assert.equal(terminal.destDir, destDir);
     assert.deepEqual(terminal.created, [path.join(destDir, 'first')]);
+    assert.deepEqual(terminal.undo.map((item) => item.path), terminal.created);
+    assert.equal(typeof terminal.undo[0].token, 'string');
     assert.equal(!!terminal.canceled, canceled);
     assert.equal(await fsp.readFile(path.join(destDir, 'first'), 'utf8'), 'contents');
   });

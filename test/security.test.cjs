@@ -61,9 +61,11 @@ test('malformed IPC inputs are rejected before touching files or starting a copy
     ['fs:searchSpotlight', '/', 'q', { showHidden: 'yes' }],
     ['fs:searchSpotlight', '/', 'q', { maxDepth: 2 }],
     ['fs:copyCancel', '1'], ['fs:watch', '', '/'], ['clipboard:writeText', {}],
+    ['fs:undo', ''], ['fs:undo', 42], ['fs:undo', 'a'.repeat(129)],
+    ['fs:undoRelease', 'token'], ['fs:undoRelease', [null]], ['fs:undoRelease', ['']],
     ['settings:set', { extra: true }], ['settings:get', 'extra'],
   ];
-  for (const field of ['protectedDestinations', 'job', 'report']) {
+  for (const field of ['protectedDestinations', 'job', 'report', 'onCommitted', 'onRestored', 'validateSource']) {
     for (const channel of ['fs:copy', 'fs:copyStart', 'fs:move']) {
       invalid.push([channel, ['/source'], '/dest', { [field]: {} }]);
     }
@@ -104,7 +106,11 @@ test('a validated single-source move retains its exact name and internal protect
   const result = await api.invoke('fs:move', ['/source/current'], '/dest', { name });
   assert.equal(result.ok, true);
   assert.deepEqual(result.items, [{ from: '/source/current', to: path.join('/dest', name) }]);
-  assert.deepEqual(received, { name, protectedDestinations: ['/source/current'] });
+  const { onCommitted, onRestored, ...options } = received;
+  assert.deepEqual(options, { name, protectedDestinations: ['/source/current'] });
+  assert.equal(typeof onCommitted, 'function');
+  assert.equal(typeof onRestored, 'function');
+  assert.deepEqual(result.undo, [], 'a mock without trusted metadata cannot issue Undo tokens');
 });
 
 test('copyStart stays synchronous and another trusted window cannot cancel its job', async () => {

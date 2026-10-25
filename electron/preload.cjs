@@ -9,6 +9,8 @@ contextBridge.exposeInMainWorld('api', {
   confirmConflict: (names) => ipcRenderer.invoke('ui:confirmConflict', names),
   trash: (paths) => ipcRenderer.invoke('fs:trash', paths),
   rename: (p, newName) => ipcRenderer.invoke('fs:rename', p, newName),
+  undo: (token) => ipcRenderer.invoke('fs:undo', token),
+  undoRelease: (tokens) => ipcRenderer.invoke('fs:undoRelease', tokens),
   mkdir: (parent, name) => ipcRenderer.invoke('fs:mkdir', parent, name),
   newFile: (parent, name) => ipcRenderer.invoke('fs:newFile', parent, name),
   open: (p) => ipcRenderer.invoke('fs:open', p),

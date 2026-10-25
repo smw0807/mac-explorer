@@ -88,6 +88,7 @@ test('deleting an ordinary visible selection still trashes exactly that file', a
 });
 
 const visiblePane = (ui) => ui.query('.panes:not([hidden]) .pane');
+const undoEntry = (token, path = '/test/result') => ({ path, token });
 
 async function copySelectedFile(ui) {
   await click(visiblePane(ui).querySelector('.fl-row'));
@@ -126,14 +127,14 @@ test('switching tabs preserves the current directory, history, and view without 
 });
 
 test('a copy can finish and be undone after its originating tab closes', async (t) => {
-  const trashed = [];
+  const undone = [];
   const reads = [];
   const unwatched = [];
   const ui = await mountApp({
     api: {
       readDir: async (directory) => { reads.push(directory); return { ok: true, entries: [file('source.txt')] }; },
       copyStart: async () => ({ ok: true, jobId: 101 }),
-      trash: async (paths) => { trashed.push(paths); return { ok: true }; },
+      undo: async (token) => { undone.push(token); return { ok: true, dirs: ['/test'] }; },
       unwatchDir: async (paneId) => { unwatched.push(paneId); return { ok: true }; },
     },
   });
@@ -148,11 +149,11 @@ test('a copy can finish and be undone after its originating tab closes', async (
   assert.ok(ui.query('.copy-progress[data-job-id="101"]'));
   const readsBeforeDone = reads.length;
 
-  await ui.emitCopy({ jobId: 101, destDir: '/test', done: true, created: ['/test/copied.txt'] });
+  await ui.emitCopy({ jobId: 101, destDir: '/test', done: true, created: ['/test/copied.txt'], undo: [undoEntry('closed-tab-copy', '/test/copied.txt')] });
   assert.equal(ui.query('.copy-progress'), null);
   assert.ok(reads.length > readsBeforeDone, 'the destination refreshes when the job completes');
   await key(visiblePane(ui), 'z', { metaKey: true });
-  assert.deepEqual(trashed, [['/test/copied.txt']]);
+  assert.deepEqual(undone, ['closed-tab-copy']);
 });
 
 test('multiple copy jobs remain independently cancelable after the originating dual pane is removed', async (t) => {
@@ -192,43 +193,136 @@ test('multiple copy jobs remain independently cancelable after the originating d
 
 test('completion before the copyStart response is recorded once and never restores a progress row', async (t) => {
   const response = deferred();
-  const trashed = [];
+  const undone = [];
   const ui = await mountApp({
     entries: [file('source.txt')],
     api: {
       copyStart: () => response.promise,
-      trash: async (paths) => { trashed.push(paths); return { ok: true }; },
+      undo: async (token) => { undone.push(token); return { ok: true, dirs: ['/test'] }; },
     },
   });
   t.after(() => ui.unmount());
   await copySelectedFile(ui);
   await key(visiblePane(ui), 'v', { metaKey: true });
-  const done = { jobId: 301, destDir: '/test', done: true, created: ['/test/fast.txt'] };
+  const done = { jobId: 301, destDir: '/test', done: true, created: ['/test/fast.txt'], undo: [undoEntry('fast-copy', '/test/fast.txt')] };
   await ui.emitCopy(done);
   await flush(() => response.resolve({ ok: true, jobId: 301 }));
   await ui.emitCopy(done);
   assert.equal(ui.query('.copy-progress'), null);
   await key(visiblePane(ui), 'z', { metaKey: true });
   await key(visiblePane(ui), 'z', { metaKey: true });
-  assert.deepEqual(trashed, [['/test/fast.txt']]);
+  assert.deepEqual(undone, ['fast-copy']);
 });
 
 test('completed items from a canceled copy remain undoable', async (t) => {
-  const trashed = [];
+  const undone = [];
   const ui = await mountApp({
     entries: [file('source.txt')],
     api: {
       copyStart: async () => ({ ok: true, jobId: 401 }),
-      trash: async (paths) => { trashed.push(paths); return { ok: true }; },
+      undo: async (token) => { undone.push(token); return { ok: true, dirs: ['/test'] }; },
     },
   });
   t.after(() => ui.unmount());
   await copySelectedFile(ui);
   await key(visiblePane(ui), 'v', { metaKey: true });
-  await ui.emitCopy({ jobId: 401, destDir: '/test', done: true, canceled: true, created: ['/test/completed.txt'] });
+  await ui.emitCopy({ jobId: 401, destDir: '/test', done: true, canceled: true, created: ['/test/completed.txt'], undo: [undoEntry('partial-copy', '/test/completed.txt')] });
   await key(visiblePane(ui), 'z', { metaKey: true });
-  assert.deepEqual(trashed, [['/test/completed.txt']]);
+  assert.deepEqual(undone, ['partial-copy']);
 });
+
+test('failed copy completion records only its backend tokens and tokenless completions cannot be undone', async (t) => {
+  const undone = [];
+  const ui = await mountApp({ api: {
+    undo: async (token) => { undone.push(token); return { ok: true, dirs: ['/test'] }; },
+    trash: () => assert.fail('copy undo must not delete by path'),
+  } });
+  t.after(() => ui.unmount());
+  await ui.emitCopy({ jobId: 450, destDir: '/test', done: true, created: ['/test/untracked.txt'] });
+  await key(visiblePane(ui), 'z', { metaKey: true });
+  assert.deepEqual(undone, []);
+  await ui.emitCopy({
+    jobId: 451, destDir: '/test', done: true, error: 'second file failed',
+    created: ['/test/completed.txt'], undo: [undoEntry('failed-job-success', '/test/completed.txt')],
+  });
+  await key(visiblePane(ui), 'z', { metaKey: true });
+  assert.deepEqual(undone, ['failed-job-success']);
+  assert.match(ui.alerts[0], /second file failed/);
+});
+
+test('inline rename records the backend token without constructing an inverse rename', async (t) => {
+  const renamed = [];
+  const undone = [];
+  const ui = await mountApp({ entries: [file('old.txt')], api: {
+    rename: async (from, name) => {
+      renamed.push([from, name]);
+      return { ok: true, path: '/test/new.txt', undo: [undoEntry('inline-rename', '/test/new.txt')] };
+    },
+    undo: async (token) => { undone.push(token); return { ok: true, dirs: ['/test'] }; },
+  } });
+  t.after(() => ui.unmount());
+  await click(visiblePane(ui).querySelector('.fl-row'));
+  await key(visiblePane(ui), 'F2');
+  await changeValue(ui.query('.rename-input'), 'new.txt');
+  await key(ui.query('.rename-input'), 'Enter');
+  await key(visiblePane(ui), 'z', { metaKey: true });
+  assert.deepEqual(renamed, [['/test/old.txt', 'new.txt']]);
+  assert.deepEqual(undone, ['inline-rename']);
+});
+
+test('partially successful batch rename combines its tokens into one reverse-order undo', async (t) => {
+  const renamed = [];
+  const undone = [];
+  const ui = await mountApp({ entries: ['a', 'b', 'c'].map((name) => file(`old-${name}.txt`)), api: {
+    rename: async (from, name) => {
+      renamed.push([from, name]);
+      if (name === 'new-c.txt') return { ok: false, error: 'c is busy' };
+      return { ok: true, path: `/test/${name}`, undo: [undoEntry(`batch-${name}`, `/test/${name}`)] };
+    },
+    undo: async (token) => { undone.push(token); return { ok: true, dirs: ['/test'] }; },
+  } });
+  t.after(() => ui.unmount());
+  await key(visiblePane(ui), 'a', { metaKey: true });
+  await flush(() => ui.query('.fl-row').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true })));
+  await click(ui.queryAll('.cm-item').find((node) => node.textContent === '일괄 이름 변경…'));
+  await changeValue(ui.queryAll('.modal-fields input')[0], 'old');
+  await changeValue(ui.queryAll('.modal-fields input')[1], 'new');
+  await click(ui.query('.modal-actions .primary'));
+  assert.match(ui.alerts[0], /c is busy/);
+  await key(visiblePane(ui), 'z', { metaKey: true });
+  assert.deepEqual(undone, ['batch-new-b.txt', 'batch-new-a.txt']);
+  await key(visiblePane(ui), 'z', { metaKey: true });
+  assert.equal(undone.length, 2, 'the entire successful batch belongs to one history entry');
+  assert.equal(renamed.length, 3, 'undo does not issue another rename');
+});
+
+for (const operation of ['mkdir', 'newFile', 'compress', 'extract']) {
+  test(`${operation} forwards its creation token to application undo`, async (t) => {
+    const undone = [];
+    const created = file('created-result', { isDir: operation === 'mkdir' || operation === 'extract' });
+    let entries = operation === 'compress' || operation === 'extract' ? [file('source.zip')] : [];
+    const ui = await mountApp({ api: {
+      readDir: async () => ({ ok: true, entries }),
+      [operation]: async () => {
+        entries = [...entries, created];
+        return { ok: true, path: created.path, undo: [undoEntry(`created-by-${operation}`, created.path)] };
+      },
+      undo: async (token) => { undone.push(token); return { ok: true, dirs: ['/test'] }; },
+      trash: () => assert.fail('creation undo must not delete by path'),
+    } });
+    t.after(() => ui.unmount());
+    if (operation === 'mkdir') await key(visiblePane(ui), 'N', { metaKey: true, shiftKey: true });
+    else {
+      const target = operation === 'newFile' ? ui.query('.filelist') : ui.query('.fl-row');
+      await flush(() => target.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true })));
+      const label = { newFile: '새 파일', compress: '압축하기', extract: '압축 해제' }[operation];
+      await click(ui.queryAll('.cm-item').find((node) => node.textContent === label));
+    }
+    if (ui.query('.rename-input')) await key(ui.query('.rename-input'), 'Escape');
+    await key(visiblePane(ui), 'z', { metaKey: true });
+    assert.deepEqual(undone, [`created-by-${operation}`]);
+  });
+}
 
 const displayedNames = (ui) => ui.queryAll('.fl-name').map((node) => node.textContent);
 
@@ -471,21 +565,19 @@ test('cut paste retains failed and skipped sources, excludes recovery copies, an
   const ui = await mountApp({
     api: {
       readDir: async (directory) => ({ ok: true, entries: directory === '/test' ? sources : [] }),
-      move: async (paths, directory, options) => {
-        if (options.name) {
-          restored.push(paths);
-          return { ok: true, items: [{ from: paths[0], to: `${directory}/${options.name}` }] };
-        }
+      move: async (paths) => {
         pasted.push(paths);
         if (pasted.length === 1) return {
           ok: false,
           items: [{ from: '/test/a.txt', to: '/test/Downloads/a.txt' }],
+          undo: [undoEntry('move-a', '/test/Downloads/a.txt')],
           recovery: [{ from: '/test/b.txt', to: '/test/Downloads/b.txt' }],
           error: '복구용 완성본: /test/Downloads/b.txt',
         };
         if (pasted.length === 2) return { ok: true, items: [] };
-        return { ok: true, items: [{ from: '/test/c.txt', to: '/test/Downloads/c.txt' }] };
+        return { ok: true, items: [{ from: '/test/c.txt', to: '/test/Downloads/c.txt' }], undo: [undoEntry('move-c', '/test/Downloads/c.txt')] };
       },
+      undo: async (token) => { restored.push(token); return { ok: true, dirs: ['/test', '/test/Downloads'] }; },
     },
   });
   t.after(() => ui.unmount());
@@ -503,7 +595,7 @@ test('cut paste retains failed and skipped sources, excludes recovery copies, an
   await key(visiblePane(ui), 'z', { metaKey: true });
   await key(visiblePane(ui), 'z', { metaKey: true });
   await key(visiblePane(ui), 'z', { metaKey: true });
-  assert.deepEqual(restored, [['/test/Downloads/c.txt'], ['/test/Downloads/a.txt']]);
+  assert.deepEqual(restored, ['move-c', 'move-a']);
 });
 
 test('a delayed cut paste does not replace a newer clipboard selection', async (t) => {
@@ -523,7 +615,7 @@ test('a delayed cut paste does not replace a newer clipboard selection', async (
   await key(visiblePane(ui), 'v', { metaKey: true });
   await click(visiblePane(ui).querySelector('.fl-row'));
   await key(visiblePane(ui), 'c', { metaKey: true });
-  await flush(() => moved.resolve({ ok: true, items: [{ from: '/test/source.txt', to: '/test/Downloads/source.txt' }] }));
+  await flush(() => moved.resolve({ ok: true, items: [{ from: '/test/source.txt', to: '/test/Downloads/source.txt' }], undo: [undoEntry('delayed-move', '/test/Downloads/source.txt')] }));
   assert.match(visiblePane(ui).querySelector('.statusbar').textContent, /클립보드: 1개 \(복사\)/);
   await key(visiblePane(ui), 'v', { metaKey: true });
   assert.deepEqual(copies, [['/test/Downloads/new-copy.txt']]);

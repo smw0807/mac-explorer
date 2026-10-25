@@ -7,11 +7,24 @@ const { pathToFileURL } = require('url');
 const { execFile } = require('child_process');
 const { promisify } = require('util');
 const execFileP = promisify(execFile);
-const { statEntry, uniqueDest, copyItem, moveItem, treeSize, cancelError, validateBatch } = require('./file-operations.cjs');
+const { statEntry, copyItem, moveItem, createItem, treeSize, cancelError, validateBatch } = require('./file-operations.cjs');
 const { compress, extract } = require('./archive.cjs');
 const { absolutePath, validateArguments, validateSender } = require('./ipc-validation.cjs');
 const { readSettings, writeSettings } = require('./settings.cjs');
 const { createOperationLifecycle } = require('./operation-lifecycle.cjs');
+const { createUndoRegistry } = require('./undo-registry.cjs');
+
+const undoRegistry = createUndoRegistry({ moveItem, trashItem: (p) => shell.trashItem(p) });
+function appendUndo(records, receipt) { if (receipt) records.push(receipt); }
+function createReceipt(sender, records) {
+  return (metadata) => appendUndo(records, undoRegistry.recordCreate(sender, metadata));
+}
+
+async function createWithUndo(sender, callback) {
+  const undo = [];
+  try { return ok({ path: await callback(createReceipt(sender, undo)), undo }); }
+  catch (err) { return { ...fail(err), ...(err.committedDest ? { path: err.committedDest } : {}), undo }; }
+}
 
 // custom protocol for previewing local files (images/video) in the renderer
 protocol.registerSchemesAsPrivileged([
@@ -24,7 +37,7 @@ const isDev = !app.isPackaged && process.env.VITE_DEV === '1';
 const appURL = isDev ? 'http://localhost:5173/' : pathToFileURL(path.join(__dirname, '../dist/index.html')).href;
 const fileMutationChannels = new Set([
   'fs:copy', 'fs:copyStart', 'fs:move', 'fs:trash', 'fs:rename',
-  'fs:mkdir', 'fs:newFile', 'fs:compress', 'fs:extract',
+  'fs:mkdir', 'fs:newFile', 'fs:compress', 'fs:extract', 'fs:undo',
 ]);
 const operations = createOperationLifecycle(app, {
   cancelOperations: () => {
@@ -188,18 +201,20 @@ handle('ui:confirmConflict', async (e, names) => {
   return ok({ choice: ['keepBoth', 'overwrite', 'skip', 'cancel'][r.response] });
 });
 
-handle('fs:copy', async (_e, paths, destDir, opts = {}) => {
+handle('fs:copy', async (e, paths, destDir, opts = {}) => {
   const created = [];
+  const undo = [];
   try {
     await validateBatch(paths, destDir, opts);
     for (const p of paths) {
-      const dest = await copyItem(p, destDir, { ...opts, protectedDestinations: [...paths, ...created] });
+      const dest = await copyItem(p, destDir, { ...opts, protectedDestinations: [...paths, ...created],
+        onCommitted: createReceipt(e.sender, undo) });
       if (dest) created.push(dest);
     }
-    return ok({ created });
+    return ok({ created, undo });
   } catch (err) {
     if (err.committedDest && !created.includes(err.committedDest)) created.push(err.committedDest);
-    return { ...fail(err), created };
+    return { ...fail(err), created, undo };
   }
 });
 
@@ -227,21 +242,23 @@ handle('fs:copyStart', (e, paths, destDir, opts = {}) => {
     };
     const timer = setInterval(() => send(), 100);
     const created = [];
+    const undo = [];
     try {
       await validateBatch(paths, destDir, opts);
       for (const p of paths) report.total += await treeSize(p, job);
       send();
       for (const p of paths) {
         if (job.canceled) throw cancelError();
-        const dest = await copyItem(p, destDir, { ...opts, job, report, protectedDestinations: [...paths, ...created] });
+        const dest = await copyItem(p, destDir, { ...opts, job, report, protectedDestinations: [...paths, ...created],
+          onCommitted: createReceipt(sender, undo) });
         if (dest) created.push(dest);
       }
       clearInterval(timer);
-      send({ done: true, created });
+      send({ done: true, created, undo });
     } catch (err) {
       clearInterval(timer);
       if (err.committedDest && !created.includes(err.committedDest)) created.push(err.committedDest);
-      send({ done: true, created, canceled: !!err.canceled, error: err.canceled ? null : (err.message || String(err)) });
+      send({ done: true, created, undo, canceled: !!err.canceled, error: err.canceled ? null : (err.message || String(err)) });
     } finally {
       copyJobs.delete(jobId);
       sender.removeListener('destroyed', onDestroyed);
@@ -258,22 +275,30 @@ handle('fs:copyCancel', (e, jobId) => {
   return ok({});
 });
 
-handle('fs:move', async (_e, paths, destDir, opts = {}) => {
+handle('fs:move', async (e, paths, destDir, opts = {}) => {
   const items = [];
   const recovery = [];
+  const undo = [];
   try {
     await validateBatch(paths, destDir, opts);
     for (const p of paths) {
+      let metadata;
       try {
-        const dest = await moveItem(p, destDir, { ...opts, protectedDestinations: [...paths, ...items.map((item) => item.to)] });
-        if (dest) items.push({ from: p, to: dest });
+        const dest = await moveItem(p, destDir, { ...opts, protectedDestinations: [...paths, ...items.map((item) => item.to)],
+          onCommitted: (value) => { metadata = value; },
+          onRestored: (value) => undoRegistry.restored(e.sender, value) });
+        if (dest) {
+          items.push({ from: p, to: dest });
+          appendUndo(undo, undoRegistry.recordMove(e.sender, metadata));
+        }
       } catch (err) {
         if (err.committedDest) recovery.push({ from: p, to: err.committedDest });
+        if (err.committedDest && metadata?.sourceStaged) appendUndo(undo, undoRegistry.recordMove(e.sender, metadata));
         throw err;
       }
     }
-    return ok({ items });
-  } catch (err) { return { ...fail(err), items, recovery }; }
+    return ok({ items, undo });
+  } catch (err) { return { ...fail(err), items, recovery, undo }; }
 });
 
 handle('fs:trash', async (_e, paths) => {
@@ -283,32 +308,33 @@ handle('fs:trash', async (_e, paths) => {
       await shell.trashItem(p);
       trashed.push(p);
     }
-    return ok({ trashed });
-  } catch (err) { return { ...fail(err), trashed }; }
+    return ok({ trashed, undo: [] });
+  } catch (err) { return { ...fail(err), trashed, undo: [] }; }
 });
 
-handle('fs:rename', async (_e, p, newName) => {
+handle('fs:rename', async (e, p, newName) => {
+  const undo = [];
+  let metadata;
   try {
-    const dest = await moveItem(p, path.dirname(p), { name: newName });
-    return ok({ path: dest || p });
-  } catch (err) { return fail(err); }
+    const dest = await moveItem(p, path.dirname(p), { name: newName,
+      onCommitted: (value) => { metadata = value; },
+      onRestored: (value) => undoRegistry.restored(e.sender, value) });
+    if (dest) appendUndo(undo, undoRegistry.recordMove(e.sender, metadata));
+    return ok({ path: dest || p, undo });
+  } catch (err) {
+    if (err.committedDest && metadata?.sourceStaged) appendUndo(undo, undoRegistry.recordMove(e.sender, metadata));
+    return { ...fail(err), ...(err.committedDest ? { path: err.committedDest } : {}), undo };
+  }
 });
 
-handle('fs:mkdir', async (_e, parent, name) => {
-  try {
-    const dest = await uniqueDest(parent, name || '새 폴더');
-    await fsp.mkdir(dest);
-    return ok({ path: dest });
-  } catch (err) { return fail(err); }
-});
+handle('fs:mkdir', (e, parent, name) => createWithUndo(e.sender,
+  (onCommitted) => createItem(parent, name || '새 폴더', { directory: true, onCommitted })));
 
-handle('fs:newFile', async (_e, parent, name) => {
-  try {
-    const dest = await uniqueDest(parent, name || '새 파일.txt');
-    await fsp.writeFile(dest, '', { flag: 'wx' });
-    return ok({ path: dest });
-  } catch (err) { return fail(err); }
-});
+handle('fs:newFile', (e, parent, name) => createWithUndo(e.sender,
+  (onCommitted) => createItem(parent, name || '새 파일.txt', { onCommitted })));
+
+handle('fs:undo', (e, token) => undoRegistry.undo(e.sender, token));
+handle('fs:undoRelease', (e, tokens) => { undoRegistry.release(e.sender, tokens); return ok({}); });
 
 handle('fs:fileIcon', async (_e, p) => {
   try {
@@ -389,17 +415,11 @@ handle('fs:exists', async (_e, p) => {
 /* ---------- zip (compress / extract) ---------- */
 
 // 선택 항목들을 같은 폴더에 zip으로 압축 (Finder처럼 단일 항목은 그 이름, 여러 개면 '보관')
-handle('fs:compress', async (_e, paths) => {
-  try {
-    return ok({ path: await compress(paths) });
-  } catch (err) { return fail(err); }
-});
+handle('fs:compress', (e, paths) => createWithUndo(e.sender,
+  (onCommitted) => compress(paths, { onCommitted })));
 
-handle('fs:extract', async (_e, zipPath) => {
-  try {
-    return ok({ path: await extract(zipPath) });
-  } catch (err) { return fail(err); }
-});
+handle('fs:extract', (e, zipPath) => createWithUndo(e.sender,
+  (onCommitted) => extract(zipPath, { onCommitted })));
 
 /* ---------- settings (session/favorites persistence) ---------- */
 

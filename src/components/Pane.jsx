@@ -276,7 +276,7 @@ export default function Pane({
     const res = await window.api.move(clipboard.paths, path, opts);
     const recoverySources = new Set((res.recovery || []).map((item) => item.from));
     const moved = (res.items || []).filter((item) => !recoverySources.has(item.from));
-    if (moved.length) recordOp({ type: 'move', items: moved });
+    recordOp({ type: 'move', undo: res.undo });
     const completed = new Set([...moved.map((item) => item.from), ...recoverySources]);
     if (completed.size) {
       setClipboard((previous) => {
@@ -314,8 +314,8 @@ export default function Pane({
     const oldName = basename(renaming);
     if (renameValue && renameValue !== oldName) {
       const res = await window.api.rename(renaming, renameValue);
+      recordOp({ type: 'rename', undo: res.undo });
       if (!res.ok) alert(res.error);
-      else recordOp({ type: 'rename', from: renaming, to: res.path });
     }
     setRenaming(null);
     load();
@@ -323,8 +323,8 @@ export default function Pane({
 
   const newFolder = useCallback(async () => {
     const res = await window.api.mkdir(path, '새 폴더');
+    recordOp({ type: 'create', undo: res.undo });
     if (res.ok) {
-      recordOp({ type: 'create', path: res.path });
       await load();
       if (!mountedRef.current || path !== currentPathRef.current) return;
       setSelection(new Set([res.path]));
@@ -335,8 +335,8 @@ export default function Pane({
 
   const newFile = useCallback(async () => {
     const res = await window.api.newFile(path, '새 파일.txt');
+    recordOp({ type: 'create', undo: res.undo });
     if (res.ok) {
-      recordOp({ type: 'create', path: res.path });
       await load();
       if (!mountedRef.current || path !== currentPathRef.current) return;
       setSelection(new Set([res.path]));
@@ -346,14 +346,14 @@ export default function Pane({
   }, [path, load]);
 
   const applyBatchRename = useCallback(async (renames) => {
-    const items = [];
+    const undo = [];
     for (const { from, to } of renames) {
       if (basename(from) === to) continue;
       const res = await window.api.rename(from, to);
+      undo.push(...(res.undo || []));
       if (!res.ok) { alert(res.error); break; }
-      items.push({ from, to: res.path });
     }
-    if (items.length) recordOp({ type: 'renameBatch', items });
+    recordOp({ type: 'renameBatch', undo });
     setBatchRename(false);
     setSelection(new Set());
     load();
@@ -456,14 +456,14 @@ export default function Pane({
         { separator: true },
         { label: '압축하기', onClick: async () => {
             const res = await window.api.compress([...sel]);
+            recordOp({ type: 'create', undo: res.undo });
             if (!res.ok) alert(res.error);
-            else recordOp({ type: 'create', path: res.path });
             load();
           } },
         ...(!multi && entry.ext === 'zip' ? [{ label: '압축 해제', onClick: async () => {
             const res = await window.api.extract(entry.path);
+            recordOp({ type: 'create', undo: res.undo });
             if (!res.ok) alert(res.error);
-            else recordOp({ type: 'create', path: res.path });
             load();
           } }] : []),
         { separator: true },

@@ -15,7 +15,7 @@ export default function useCopyJobs() {
       // Keep its ID so that the response cannot restore a finished progress row.
       completed.current.add(event.jobId);
       setJobs((previous) => previous.filter((job) => job.jobId !== event.jobId));
-      if (event.created?.length) recordOp({ type: 'copy', created: event.created });
+      recordOp({ type: 'copy', undo: event.undo });
       const dirs = new Set(event.created?.map(parentPath) || []);
       if (event.destDir) dirs.add(event.destDir);
       if (dirs.size) notifyFsChanged([...dirs]);

@@ -69,6 +69,8 @@ const schemas = {
   'ui:confirmConflict': [list(fileName)],
   'fs:trash': [paths],
   'fs:rename': [absolutePath, fileName],
+  'fs:undo': [text(128)],
+  'fs:undoRelease': [list(text(128), 0, 65536)],
   'fs:mkdir': [absolutePath, optional(fileName)],
   'fs:newFile': [absolutePath, optional(fileName)],
   'fs:fileIcon': [absolutePath],

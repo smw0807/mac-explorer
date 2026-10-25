@@ -5,6 +5,9 @@ const fsp = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 const vm = require('node:vm');
+const { EventEmitter } = require('node:events');
+const { assertSnapshot } = require('../electron/file-snapshot.cjs');
+const { createUndoRegistry } = require('../electron/undo-registry.cjs');
 
 const operationsPath = path.resolve(__dirname, '../electron/file-operations.cjs');
 const operations = require(operationsPath);
@@ -560,6 +563,153 @@ test('cancellation after backup rename finishes committed cleanup', async (t) =>
   await assertMissing(source);
   await assertText(dest, 'new contents');
   await assertNoWorkspace(destDir);
+});
+
+test('commit metadata records the published identity without changing copied timestamps', async (t) => {
+  const { sourceDir, destDir } = await fixture(t);
+  const source = path.join(sourceDir, 'folder');
+  await fsp.mkdir(source);
+  await fsp.writeFile(path.join(source, 'file'), 'contents');
+  await fsp.symlink('file', path.join(source, 'link'));
+  const atime = new Date('2001-02-03T04:05:06Z');
+  const mtime = new Date('2002-03-04T05:06:07Z');
+  for (const name of ['', 'file']) await fsp.utimes(path.join(source, name), atime, mtime);
+  await fsp.lutimes(path.join(source, 'link'), atime, mtime);
+  let metadata;
+  const dest = await operations.copyItem(source, destDir, { onCommitted(value) { metadata = value; } });
+  assert.equal(metadata.source, source);
+  assert.equal(metadata.dest, dest);
+  assert.equal(metadata.sourceStaged, false);
+  for (const name of ['', 'file', 'link']) {
+    const stat = await fsp.lstat(path.join(dest, name));
+    assert.ok(Math.abs(stat.atimeMs - atime.getTime()) < 2);
+    assert.ok(Math.abs(stat.mtimeMs - mtime.getTime()) < 2);
+  }
+  await assertSnapshot(dest, metadata.snapshot);
+});
+
+test('post-commit edits cannot become the original Undo snapshot', async (t) => {
+  const { source, dest, destDir } = await pair(t);
+  let metadata;
+  assert.equal(await operations.copyItem(source, destDir, {
+    conflict: 'overwrite',
+    async onCommitted(value) {
+      metadata = value;
+      await fsp.writeFile(value.dest, 'edited after publication');
+    },
+  }), dest);
+  await assert.rejects(assertSnapshot(dest, metadata.snapshot), { code: 'FS_CHANGED' });
+  await assertText(dest, 'edited after publication');
+});
+
+test('an Undo metadata consumer failure never rolls back a completed copy', async (t) => {
+  const { source, dest, destDir } = await pair(t);
+  assert.equal(await operations.copyItem(source, destDir, {
+    conflict: 'overwrite', onCommitted() { throw new Error('consumer failed'); },
+  }), dest);
+  await assertText(dest, 'new contents');
+  await assertText(source, 'new contents');
+  await assertNoWorkspace(destDir);
+});
+
+test('a destination created during metadata preparation is preserved', async (t) => {
+  const { sourceDir, destDir } = await fixture(t);
+  const source = path.join(sourceDir, 'folder');
+  const dest = path.join(destDir, 'folder');
+  await fsp.mkdir(source);
+  await fsp.writeFile(path.join(source, 'file'), 'contents');
+  let injected = false;
+  const isolated = loadOperations({ fsp: {
+    async readdir(p, ...args) {
+      const names = await fsp.readdir(p, ...args);
+      if (path.basename(p) === 'new' && path.dirname(p).startsWith(path.join(destDir, '.mac-explorer-')) && !injected) {
+        injected = true;
+        await fsp.writeFile(dest, 'created externally');
+      }
+      return names;
+    },
+  } });
+  await assert.rejects(isolated.copyItem(source, destDir, { onCommitted() {} }), { code: 'FS_CHANGED' });
+  assert.equal(injected, true);
+  await assertText(dest, 'created externally');
+  await assertNoWorkspace(destDir);
+});
+
+test('failed staging cleanup reports its own workspace and keeps the original error', async (t) => {
+  const { source, dest, destDir } = await pair(t);
+  let workspace;
+  const isolated = loadOperations({ fsp: {
+    async rm(p, options) {
+      if (path.dirname(p) === destDir && path.basename(p).startsWith('.mac-explorer-')) {
+        workspace = p;
+        throw fsError('EACCES');
+      }
+      return fsp.rm(p, options);
+    },
+  } });
+  const writer = async (_input, staged) => {
+    await fsp.writeFile(staged, 'partial');
+    throw fsError('ENOSPC');
+  };
+  await assert.rejects(isolated.copyItem(source, destDir, { conflict: 'overwrite' }, writer), (err) => {
+    return err.code === 'ENOSPC' && err.cleanupPath === workspace && err.message.includes(workspace);
+  });
+  await assertText(source, 'new contents');
+  await assertText(dest, 'existing contents');
+  await assertText(path.join(workspace, 'new'), 'partial');
+});
+
+test('Undo lineage survives EXDEV moves and updates the earlier creation inode', async (t) => {
+  const { sourceDir, destDir } = await fixture(t);
+  const source = path.join(sourceDir, 'item');
+  const dest = path.join(destDir, 'item');
+  const owner = Object.assign(new EventEmitter(), { isDestroyed: () => false });
+  const isolated = loadOperations({ fsp: {
+    async rename(from, to) {
+      if (from === source || from === dest) throw fsError('EXDEV');
+      return fsp.rename(from, to);
+    },
+  } });
+  const registry = createUndoRegistry({ moveItem: isolated.moveItem, trashItem: (p) => fsp.rm(p, { recursive: true }) });
+  let created;
+  await operations.createItem(sourceDir, 'item', { onCommitted(value) { created = registry.recordCreate(owner, value); } });
+  const originalInode = (await fsp.lstat(source)).ino;
+  let metadata;
+  await isolated.moveItem(source, destDir, { onCommitted(value) { metadata = value; } });
+  const moved = registry.recordMove(owner, metadata);
+  assert.notEqual((await fsp.lstat(dest)).ino, originalInode);
+  assert.equal((await registry.undo(owner, moved.token)).ok, true);
+  assert.equal((await registry.undo(owner, created.token)).ok, true);
+  await assertMissing(source);
+  await assertMissing(dest);
+});
+
+test('Undo can retry after a verified rollback changes its own source ctime', async (t) => {
+  const { sourceDir } = await fixture(t);
+  const original = path.join(sourceDir, 'original');
+  const renamed = path.join(sourceDir, 'renamed');
+  const owner = Object.assign(new EventEmitter(), { isDestroyed: () => false });
+  let failOnce = true;
+  const isolated = loadOperations({ fsp: {
+    async rename(from, to) {
+      if (to === original && path.basename(from) === 'new' && failOnce) {
+        failOnce = false;
+        throw fsError('EIO');
+      }
+      return fsp.rename(from, to);
+    },
+  } });
+  const registry = createUndoRegistry({ moveItem: isolated.moveItem, trashItem: (p) => fsp.rm(p) });
+  let created;
+  await operations.createItem(sourceDir, 'original', { onCommitted(value) { created = registry.recordCreate(owner, value); } });
+  let metadata;
+  await operations.moveItem(original, sourceDir, { name: 'renamed', onCommitted(value) { metadata = value; } });
+  const moved = registry.recordMove(owner, metadata);
+  assert.equal((await registry.undo(owner, moved.token)).ok, false);
+  await assertText(renamed, '');
+  assert.equal((await registry.undo(owner, moved.token)).ok, true);
+  assert.equal((await registry.undo(owner, created.token)).ok, true);
+  await assertMissing(original);
 });
 
 for (const mode of [0o700, 0o600]) {
