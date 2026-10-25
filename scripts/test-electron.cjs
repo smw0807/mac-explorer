@@ -17,10 +17,10 @@ async function main() {
   const cli = require.resolve('electron/cli.js');
   const version = await run(process.execPath, [cli, '--version'], { env, timeout: 180000 });
   process.stdout.write(version.stdout);
-  for (const mode of ['smoke', 'move', 'copy']) {
+  for (const mode of ['smoke', 'move', 'copy', 'ui']) {
     const fixture = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'mac-explorer-smoke-')));
     try {
-      const script = mode === 'smoke' ? 'electron-smoke.cjs' : 'electron-lifecycle.cjs';
+      const script = mode === 'smoke' ? 'electron-smoke.cjs' : mode === 'ui' ? 'electron-ui.cjs' : 'electron-lifecycle.cjs';
       const result = await run(process.execPath, [cli, path.join(project, 'test', script)], {
         cwd: project,
         env: { ...env, MAC_EXPLORER_SMOKE_ROOT: fixture, MAC_EXPLORER_LIFECYCLE_MODE: mode },

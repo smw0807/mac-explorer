@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { mountPane, mountApp, file, deferred, flush, click, key, changeValue } = require('./helpers/ui.cjs');
+const { mountComponent, mountPane, mountApp, file, deferred, flush, click, key, changeValue } = require('./helpers/ui.cjs');
 
 test('filtering out a selected file excludes it from delete, copy, and cut', async (t) => {
   const trashed = [];
@@ -770,4 +770,232 @@ test('watch IPC rejection is recoverable and late failures after unmount are han
   await ui.unmount();
   await flush(() => late.reject(new Error('late IPC failure')));
   assert.equal(ui.container.isConnected, false);
+});
+
+async function prepareBatch(ui) {
+  await key(ui.query('.pane'), 'a', { metaKey: true });
+  await flush(() => ui.query('.fl-row').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true })));
+  await click(ui.queryAll('.cm-item').find((node) => node.textContent === '일괄 이름 변경…'));
+  await changeValue(ui.queryAll('.modal-fields input')[0], 'old');
+  await changeValue(ui.queryAll('.modal-fields input')[1], 'new');
+}
+
+test('batch Cancel and mode buttons never submit on Enter or click', async (t) => {
+  const applied = [];
+  let canceled = 0;
+  const ui = await mountComponent('src/components/BatchRenameDialog.jsx', { props: {
+    entries: [file('old-a.txt'), file('old-b.txt')],
+    onApply: (renames) => applied.push(renames), onCancel: () => { canceled++; },
+  } });
+  t.after(() => ui.unmount());
+  await changeValue(ui.queryAll('.modal-fields input')[0], 'old');
+  await changeValue(ui.queryAll('.modal-fields input')[1], 'new');
+  const cancel = ui.query('.modal-actions button');
+  assert.equal(cancel.type, 'button');
+  await flush(() => cancel.focus());
+  await key(cancel, 'Enter');
+  // jsdom has no keyboard activation default; click exercises the browser button action.
+  await click(cancel);
+  assert.equal(canceled, 1);
+  const mode = ui.queryAll('.modal-modes button')[1];
+  assert.equal(mode.type, 'button');
+  await key(mode, 'Enter');
+  await click(mode);
+  assert.deepEqual(applied, []);
+  assert.ok(ui.query('input[type="number"]'));
+});
+
+test('batch submission is locked immediately and cannot be canceled or changed while pending', async (t) => {
+  const pending = deferred();
+  const applied = [];
+  let canceled = 0;
+  const ui = await mountComponent('src/components/BatchRenameDialog.jsx', { props: {
+    entries: [file('old-a.txt'), file('old-b.txt')],
+    onApply: (renames) => { applied.push(renames); return pending.promise; },
+    onCancel: () => { canceled++; },
+  } });
+  t.after(() => ui.unmount());
+  await changeValue(ui.queryAll('.modal-fields input')[0], 'old');
+  await changeValue(ui.queryAll('.modal-fields input')[1], 'new');
+  const form = ui.query('form');
+  await flush(() => {
+    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+  });
+  assert.equal(applied.length, 1);
+  assert.equal(form.getAttribute('aria-busy'), 'true');
+  assert(ui.queryAll('button, input').every((node) => node.disabled));
+  await click(ui.query('.modal-actions button'));
+  await key(form, 'Escape');
+  await key(form, 'Enter');
+  await key(form, 'Tab');
+  await flush(() => ui.query('.modal-overlay').dispatchEvent(new MouseEvent('mousedown', { bubbles: true })));
+  assert.equal(canceled, 0);
+  assert.equal(document.activeElement, form, 'pending modal keeps keyboard focus away from background actions');
+  assert.equal(applied.length, 1);
+  await flush(() => pending.resolve());
+  assert.equal(form.getAttribute('aria-busy'), 'false');
+  await click(ui.query('.modal-actions button'));
+  assert.equal(canceled, 1);
+});
+
+test('batch IME confirmation does not submit and normal submission resumes after composition', async (t) => {
+  const applied = [];
+  const ui = await mountComponent('src/components/BatchRenameDialog.jsx', { props: {
+    entries: [file('old-a.txt')], onApply: (renames) => applied.push(renames), onCancel() {},
+  } });
+  t.after(() => ui.unmount());
+  await changeValue(ui.queryAll('.modal-fields input')[0], 'old');
+  const input = ui.queryAll('.modal-fields input')[1];
+  await changeValue(input, '새 이름');
+  await flush(() => input.dispatchEvent(new window.CompositionEvent('compositionstart', { bubbles: true })));
+  const enter = new KeyboardEvent('keydown', { key: 'Enter', isComposing: true, bubbles: true, cancelable: true });
+  await flush(() => input.dispatchEvent(enter));
+  assert.equal(enter.defaultPrevented, true);
+  await flush(() => ui.query('form').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })));
+  assert.deepEqual(applied, []);
+  await flush(() => input.dispatchEvent(new window.CompositionEvent('compositionend', { bubbles: true })));
+  await click(ui.query('.primary'));
+  assert.equal(applied.length, 1);
+});
+
+test('batch targets stay fixed when a directory refresh changes the live selection', async (t) => {
+  let entries = [file('old-a.txt'), file('old-b.txt')];
+  const renamed = [];
+  const ui = await mountPane({ api: {
+    readDir: async () => ({ ok: true, entries }),
+    rename: async (from, name) => { renamed.push([from, name]); return { ok: true, path: `/test/${name}` }; },
+  } });
+  t.after(() => ui.unmount());
+  await prepareBatch(ui);
+  entries = [file('old-b.txt'), file('arrival.txt')];
+  await ui.emitDirectory({ paneId: 'test-pane', dir: '/test' });
+  assert.deepEqual(ui.queryAll('.mp-old').map((node) => node.textContent), ['old-a.txt', 'old-b.txt']);
+  assert.match(ui.query('.modal-title').textContent, /2개 항목/);
+  await click(ui.query('.primary'));
+  assert.deepEqual(renamed, [['/test/old-a.txt', 'new-a.txt'], ['/test/old-b.txt', 'new-b.txt']]);
+});
+
+test('batch IPC rejection preserves the earlier successful undo tokens and unlocks the modal', async (t) => {
+  const undone = [];
+  let calls = 0;
+  const ui = await mountApp({ entries: [file('old-a.txt'), file('old-b.txt')], api: {
+    rename: async () => {
+      if (++calls === 2) throw new Error('rename IPC disconnected');
+      return { ok: true, path: '/test/new-a.txt', undo: [undoEntry('first-batch-item')] };
+    },
+    undo: async (token) => { undone.push(token); return { ok: true, dirs: ['/test'] }; },
+  } });
+  t.after(() => ui.unmount());
+  await prepareBatch(ui);
+  await click(ui.query('.primary'));
+  assert.equal(ui.query('.modal'), null);
+  assert.match(ui.alerts[0], /rename IPC disconnected/);
+  await key(visiblePane(ui), 'z', { metaKey: true });
+  assert.deepEqual(undone, ['first-batch-item']);
+});
+
+test('inline Enter followed by blur commits once and its late completion leaves a newer edit intact', async (t) => {
+  const pending = deferred();
+  const calls = [];
+  const ui = await mountPane({ entries: [file('a.txt'), file('b.txt')], api: {
+    rename: (from, name) => { calls.push([from, name]); return pending.promise; },
+  } });
+  t.after(() => ui.unmount());
+  await click(ui.queryAll('.fl-row')[0]);
+  await key(ui.query('.pane'), 'F2');
+  const oldInput = ui.query('.rename-input');
+  await changeValue(oldInput, 'renamed-a.txt');
+  await flush(() => {
+    oldInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+    oldInput.blur();
+  });
+  assert.deepEqual(calls, [['/test/a.txt', 'renamed-a.txt']]);
+  await click(ui.queryAll('.fl-row')[1]);
+  await key(ui.query('.pane'), 'F2');
+  await changeValue(ui.query('.rename-input'), 'renamed-b.txt');
+  const newInput = ui.query('.rename-input');
+  await flush(() => pending.resolve({ ok: true, path: '/test/renamed-a.txt', undo: [undoEntry('first-inline')] }));
+  assert.equal(ui.query('.rename-input'), newInput);
+  assert.equal(newInput.value, 'renamed-b.txt');
+  await key(newInput, 'Escape');
+  assert.equal(ui.query('.rename-input'), null);
+  assert.equal(calls.length, 1);
+});
+
+test('inline rename ignores IME confirmation and reports an IPC rejection without leaving an editor stuck', async (t) => {
+  let calls = 0;
+  const ui = await mountPane({ entries: [file('old.txt')], api: {
+    rename: async () => { calls++; throw new Error('rename IPC unavailable'); },
+  } });
+  t.after(() => ui.unmount());
+  await click(ui.query('.fl-row'));
+  await key(ui.query('.pane'), 'F2');
+  const input = ui.query('.rename-input');
+  await changeValue(input, '새 이름.txt');
+  await key(input, 'Enter', { isComposing: true });
+  await key(input, 'Escape', { isComposing: true });
+  assert.equal(calls, 0);
+  assert.equal(ui.query('.rename-input'), input);
+  await key(input, 'Enter');
+  assert.equal(calls, 1);
+  assert.equal(ui.query('.rename-input'), null);
+  assert.match(ui.alerts[0], /rename IPC unavailable/);
+});
+
+for (const cancellation of ['navigate away and back', 'Escape', 'blur', 'edit address', 'unmount']) {
+  test(`late address lookup cannot navigate or alert after ${cancellation}`, async (t) => {
+    const pending = deferred();
+    const paths = [];
+    const ui = await mountPane({ props: { onPathChange: (_id, value) => paths.push(value) }, api: {
+      exists: () => pending.promise,
+    } });
+    t.after(() => ui.unmount());
+    await key(ui.query('.pane'), 'l', { metaKey: true });
+    const input = ui.query('.address-input');
+    await changeValue(input, '/old-request');
+    await key(input, 'Enter');
+    if (cancellation === 'navigate away and back') {
+      await click(ui.query('[title="상위 폴더"]'));
+      await click(ui.query('[title="뒤로"]'));
+    }
+    if (cancellation === 'Escape') await key(input, 'Escape');
+    if (cancellation === 'blur') await flush(() => input.blur());
+    if (cancellation === 'edit address') await changeValue(input, '/current-input');
+    if (cancellation === 'unmount') await ui.unmount();
+    if (cancellation === 'unmount') await flush(() => pending.reject(new Error('late lookup failure')));
+    else await flush(() => pending.resolve({ exists: cancellation !== 'Escape', isDir: true }));
+    assert.equal(paths.at(-1), '/test');
+    assert.deepEqual(ui.alerts, []);
+    if (cancellation === 'edit address') assert.equal(ui.query('.address-input').value, '/current-input');
+  });
+}
+
+test('the newest address submission wins and current lookup errors remain visible', async (t) => {
+  const first = deferred();
+  const calls = [];
+  const ui = await mountPane({ api: {
+    exists: (value) => {
+      calls.push(value);
+      if (value === '/old') return first.promise;
+      if (value === '/failure') return Promise.reject(new Error('address IPC unavailable'));
+      return Promise.resolve({ exists: true, isDir: true });
+    },
+  } });
+  t.after(() => ui.unmount());
+  await key(ui.query('.pane'), 'l', { metaKey: true });
+  await changeValue(ui.query('.address-input'), '/old');
+  await key(ui.query('.address-input'), 'Enter');
+  await changeValue(ui.query('.address-input'), '~/current');
+  await key(ui.query('.address-input'), 'Enter', { isComposing: true });
+  assert.deepEqual(calls, ['/old']);
+  await key(ui.query('.address-input'), 'Enter');
+  await flush(() => first.resolve({ exists: true, isDir: true }));
+  assert.deepEqual(calls, ['/old', '/test/current']);
+  assert.equal(ui.query('.bc-seg:last-child').textContent, 'current');
+  await key(ui.query('.pane'), 'l', { metaKey: true });
+  await changeValue(ui.query('.address-input'), '/failure');
+  await key(ui.query('.address-input'), 'Enter');
+  assert.match(ui.alerts[0], /address IPC unavailable/);
+  assert.equal(ui.query('.address-input').value, '/failure');
 });

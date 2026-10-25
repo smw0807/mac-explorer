@@ -71,7 +71,7 @@ export default function Pane({
   const [sort, setSort] = useState({ key: 'name', dir: 'asc' });
   const [filter, setFilter] = useState('');
   const [deepSearch, setDeepSearch] = useState(null); // {query, results, searching}
-  const [renaming, setRenaming] = useState(null); // path
+  const [renaming, setRenaming] = useState(null); // editing session {path}
   const [renameValue, setRenameValue] = useState('');
   const [addressEdit, setAddressEdit] = useState(false);
   const [addressValue, setAddressValue] = useState('');
@@ -80,7 +80,7 @@ export default function Pane({
   const [menu, setMenu] = useState(null); // {x, y, items}
   const [disk, setDisk] = useState(null);
   const [dragOver, setDragOver] = useState(null); // folder path or '' (pane background)
-  const [batchRename, setBatchRename] = useState(false);
+  const [batchRename, setBatchRename] = useState(null); // immutable target snapshot
   const rootRef = useRef(null);
   const addressInputRef = useRef(null);
   const searchInputRef = useRef(null);
@@ -90,6 +90,9 @@ export default function Pane({
   const loadGeneration = useRef(0);
   const searchGeneration = useRef(0);
   const watchGeneration = useRef(0);
+  const addressGeneration = useRef(0);
+  const renameSessionRef = useRef(null);
+  const batchSessionRef = useRef(null);
   const currentSearch = useRef(null);
   const showHiddenRef = useRef(showHidden);
   showHiddenRef.current = showHidden;
@@ -101,6 +104,9 @@ export default function Pane({
       loadGeneration.current += 1;
       searchGeneration.current += 1;
       watchGeneration.current += 1;
+      addressGeneration.current += 1;
+      renameSessionRef.current = null;
+      batchSessionRef.current = null;
     };
   }, []);
 
@@ -125,9 +131,13 @@ export default function Pane({
     clearSearch();
     setSelection(new Set());
     anchorRef.current = -1;
+    addressGeneration.current += 1;
     setAddressEdit(false);
     setAddressValue('');
+    renameSessionRef.current = null;
     setRenaming(null);
+    batchSessionRef.current = null;
+    setBatchRename(null);
     setMenu(null);
   }, [clearSearch]);
 
@@ -146,6 +156,33 @@ export default function Pane({
     resetNavigation(hist.stack[idx]);
     setHist((previous) => ({ ...previous, idx }));
   }, [hist, resetNavigation]);
+
+  const beginAddressEdit = useCallback(() => {
+    addressGeneration.current += 1;
+    setAddressValue(path);
+    setAddressEdit(true);
+  }, [path]);
+
+  const cancelAddressEdit = useCallback(() => {
+    addressGeneration.current += 1;
+    setAddressEdit(false);
+  }, []);
+
+  const submitAddress = useCallback(async () => {
+    const generation = ++addressGeneration.current;
+    const origin = currentPathRef.current;
+    const isCurrent = () => mountedRef.current && generation === addressGeneration.current && origin === currentPathRef.current;
+    let nextPath = addressValue.trim().replace(/\/+$/, '') || '/';
+    if (nextPath.startsWith('~')) nextPath = special.home + nextPath.slice(1);
+    try {
+      const result = await window.api.exists(nextPath);
+      if (!isCurrent()) return;
+      if (result.exists && result.isDir) navigate(nextPath);
+      else alert('폴더를 찾을 수 없습니다: ' + nextPath);
+    } catch (error) {
+      if (isCurrent()) alert(error.message || String(error));
+    }
+  }, [addressValue, navigate, special.home]);
 
   useEffect(() => {
     registerNavigator(paneId, navigate);
@@ -302,24 +339,55 @@ export default function Pane({
 
   const doTrash = useCallback(() => trashPaths(selectedPaths), [selectedPaths, trashPaths]);
 
+  const beginRename = useCallback((entryPath, name) => {
+    const session = { path: entryPath };
+    renameSessionRef.current = session;
+    setRenaming(session);
+    setRenameValue(name);
+  }, []);
+
   const startRename = useCallback(() => {
     const first = selectedEntries[0];
     if (!first) return;
-    setRenaming(first.path);
-    setRenameValue(first.name);
+    beginRename(first.path, first.name);
+  }, [selectedEntries, beginRename]);
+
+  const commitRename = useCallback(async (session, value) => {
+    if (!session || renameSessionRef.current !== session) return;
+    // Consume the editor before awaiting IPC so Enter and its ensuing blur share one commit.
+    renameSessionRef.current = null;
+    setRenaming((current) => current === session ? null : current);
+    const oldName = basename(session.path);
+    try {
+      if (value && value !== oldName) {
+        const res = await window.api.rename(session.path, value);
+        recordOp({ type: 'rename', undo: res.undo });
+        if (!res.ok) throw new Error(res.error);
+      }
+    } catch (error) {
+      if (mountedRef.current) alert(error.message || String(error));
+    } finally {
+      // A later edit owns its UI even if this operation finishes afterward.
+      if (mountedRef.current && !renameSessionRef.current) load();
+    }
+  }, [load]);
+
+  const cancelRename = useCallback((session) => {
+    if (renameSessionRef.current !== session) return;
+    renameSessionRef.current = null;
+    setRenaming(null);
+  }, []);
+
+  const openBatchRename = useCallback(() => {
+    const session = { entries: selectedEntries.map((entry) => ({ ...entry })) };
+    batchSessionRef.current = session;
+    setBatchRename(session);
   }, [selectedEntries]);
 
-  const commitRename = useCallback(async () => {
-    if (!renaming) return;
-    const oldName = basename(renaming);
-    if (renameValue && renameValue !== oldName) {
-      const res = await window.api.rename(renaming, renameValue);
-      recordOp({ type: 'rename', undo: res.undo });
-      if (!res.ok) alert(res.error);
-    }
-    setRenaming(null);
-    load();
-  }, [renaming, renameValue, load]);
+  const cancelBatchRename = useCallback(() => {
+    batchSessionRef.current = null;
+    setBatchRename(null);
+  }, []);
 
   const newFolder = useCallback(async () => {
     const res = await window.api.mkdir(path, '새 폴더');
@@ -328,10 +396,9 @@ export default function Pane({
       await load();
       if (!mountedRef.current || path !== currentPathRef.current) return;
       setSelection(new Set([res.path]));
-      setRenaming(res.path);
-      setRenameValue(basename(res.path));
+      beginRename(res.path, basename(res.path));
     } else alert(res.error);
-  }, [path, load]);
+  }, [path, load, beginRename]);
 
   const newFile = useCallback(async () => {
     const res = await window.api.newFile(path, '새 파일.txt');
@@ -340,23 +407,31 @@ export default function Pane({
       await load();
       if (!mountedRef.current || path !== currentPathRef.current) return;
       setSelection(new Set([res.path]));
-      setRenaming(res.path);
-      setRenameValue(basename(res.path));
+      beginRename(res.path, basename(res.path));
     } else alert(res.error);
-  }, [path, load]);
+  }, [path, load, beginRename]);
 
-  const applyBatchRename = useCallback(async (renames) => {
+  const applyBatchRename = useCallback(async (renames, session) => {
     const undo = [];
-    for (const { from, to } of renames) {
-      if (basename(from) === to) continue;
-      const res = await window.api.rename(from, to);
-      undo.push(...(res.undo || []));
-      if (!res.ok) { alert(res.error); break; }
+    try {
+      for (const { from, to } of renames) {
+        if (basename(from) === to) continue;
+        const res = await window.api.rename(from, to);
+        undo.push(...(res.undo || []));
+        if (!res.ok) throw new Error(res.error);
+      }
+    } catch (error) {
+      if (mountedRef.current) alert(error.message || String(error));
+    } finally {
+      // Keep completed tokens even if a later IPC request rejects or the pane closes.
+      recordOp({ type: 'renameBatch', undo });
+      if (mountedRef.current && batchSessionRef.current === session) {
+        batchSessionRef.current = null;
+        setBatchRename(null);
+        setSelection(new Set());
+        load();
+      }
     }
-    recordOp({ type: 'renameBatch', undo });
-    setBatchRename(false);
-    setSelection(new Set());
-    load();
   }, [load]);
 
   const runSearch = useCallback(async (query, spotlight = false) => {
@@ -450,8 +525,8 @@ export default function Pane({
         { label: '복사', shortcut: '⌘C', onClick: () => setClipboard({ mode: 'copy', paths: [...sel] }) },
         { label: '붙여넣기', shortcut: '⌘V', disabled: !clipboard, onClick: doPaste },
         { separator: true },
-        { label: '이름 바꾸기', shortcut: 'F2', disabled: multi, onClick: () => { setRenaming(entry.path); setRenameValue(entry.name); } },
-        ...(multi ? [{ label: '일괄 이름 변경…', onClick: () => setBatchRename(true) }] : []),
+        { label: '이름 바꾸기', shortcut: 'F2', disabled: multi, onClick: () => beginRename(entry.path, entry.name) },
+        ...(multi ? [{ label: '일괄 이름 변경…', onClick: openBatchRename }] : []),
         { label: '휴지통으로 이동', shortcut: '⌘⌫', onClick: () => trashPaths([...sel]) },
         { separator: true },
         { label: '압축하기', onClick: async () => {
@@ -470,7 +545,7 @@ export default function Pane({
         { label: '경로 복사', onClick: () => window.api.copyTextToClipboard([...sel].join('\n')) },
       ],
     });
-  }, [selection, selectedPaths, clipboard, openEntry, doPaste, load, onActivate, onOpenInNewTab, setClipboard, trashPaths]);
+  }, [selection, selectedPaths, clipboard, openEntry, doPaste, load, onActivate, onOpenInNewTab, setClipboard, trashPaths, beginRename, openBatchRename]);
 
   const handleEmptyContext = useCallback((e) => {
     e.preventDefault();
@@ -502,7 +577,7 @@ export default function Pane({
     if (meta && e.key === 'x') { e.preventDefault(); doCut(); return; }
     if (meta && e.key === 'v') { e.preventDefault(); doPaste(); return; }
     if (meta && e.key === 'r') { e.preventDefault(); refresh(); return; }
-    if (meta && e.key === 'l') { e.preventDefault(); setAddressValue(path); setAddressEdit(true); return; }
+    if (meta && e.key === 'l') { e.preventDefault(); beginAddressEdit(); return; }
     if (meta && e.key === 'f') { e.preventDefault(); searchInputRef.current?.focus(); return; }
     if (meta && e.key === 'y') { e.preventDefault(); selectedEntries[0] && window.api.quickLook(selectedEntries[0].path); return; }
     if (meta && e.shiftKey && e.key.toLowerCase() === 'n') { e.preventDefault(); newFolder(); return; }
@@ -552,7 +627,7 @@ export default function Pane({
       anchorRef.current = next;
       rootRef.current?.querySelector(`[data-idx="${next}"]`)?.scrollIntoView({ block: 'nearest' });
     }
-  }, [displayed, selection, selectedEntries, doCopy, doCut, doPaste, doTrash, startRename, openEntry, navigate, path, refresh, newFolder, view, clearSearch]);
+  }, [displayed, selection, selectedEntries, doCopy, doCut, doPaste, doTrash, startRename, openEntry, navigate, path, refresh, newFolder, view, clearSearch, beginAddressEdit]);
 
   /* ---------- render ---------- */
 
@@ -578,7 +653,7 @@ export default function Pane({
     onClick: (e) => handleRowClick(e, entry, idx),
     onDoubleClick: () => openEntry(entry),
     onContextMenu: (e) => handleRowContext(e, entry),
-    draggable: renaming !== entry.path,
+    draggable: renaming?.path !== entry.path,
     onDragStart: (e) => handleDragStart(e, entry),
     ...(entry.isDir && !entry.name.endsWith('.app') ? {
       onDragOver: (e) => {
@@ -603,11 +678,12 @@ export default function Pane({
         const dot = e.target.value.lastIndexOf('.');
         e.target.setSelectionRange(0, dot > 0 ? dot : e.target.value.length);
       }}
-      onBlur={commitRename}
+      onBlur={() => commitRename(renaming, renameValue)}
       onKeyDown={(e) => {
         e.stopPropagation();
-        if (e.key === 'Enter') commitRename();
-        if (e.key === 'Escape') setRenaming(null);
+        if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+        if (e.key === 'Enter') { e.preventDefault(); commitRename(renaming, renameValue); }
+        if (e.key === 'Escape') { e.preventDefault(); cancelRename(renaming); }
       }}
       onClick={(e) => e.stopPropagation()}
     />
@@ -647,20 +723,18 @@ export default function Pane({
             ref={addressInputRef}
             autoFocus
             value={addressValue}
-            onChange={(e) => setAddressValue(e.target.value)}
-            onBlur={() => setAddressEdit(false)}
-            onKeyDown={async (e) => {
+            onChange={(e) => { addressGeneration.current += 1; setAddressValue(e.target.value); }}
+            onBlur={cancelAddressEdit}
+            onKeyDown={(e) => {
+              if (e.nativeEvent.isComposing || e.keyCode === 229) return;
               if (e.key === 'Enter') {
-                let p = addressValue.trim().replace(/\/+$/, '') || '/';
-                if (p.startsWith('~')) p = special.home + p.slice(1);
-                const r = await window.api.exists(p);
-                if (r.exists && r.isDir) navigate(p);
-                else alert('폴더를 찾을 수 없습니다: ' + p);
-              } else if (e.key === 'Escape') setAddressEdit(false);
+                e.preventDefault();
+                submitAddress();
+              } else if (e.key === 'Escape') { e.preventDefault(); cancelAddressEdit(); }
             }}
           />
         ) : (
-          <div className="breadcrumb" onClick={() => { setAddressValue(path); setAddressEdit(true); }}>
+          <div className="breadcrumb" onClick={beginAddressEdit}>
             {segments.map((s, i) => (
               <Fragment key={s.path}>
                 {i > 0 && <span className="bc-sep">›</span>}
@@ -756,7 +830,7 @@ export default function Pane({
                       ? <img src={localFileUrl(entry.path)} loading="lazy" alt="" draggable={false} />
                       : <FileIcon entry={entry} size={48} className="gi-icon" />}
                   </div>
-                  {renaming === entry.path ? renameField : (
+                  {renaming?.path === entry.path ? renameField : (
                     <div className="gi-name" title={deepSearch ? entry.path : entry.name}>{entry.name}</div>
                   )}
                 </div>
@@ -765,7 +839,7 @@ export default function Pane({
                 <div key={entry.path} className={entryClass(entry, 'fl-row')} {...entryProps(entry, idx)}>
                   <div className="col col-name">
                     <FileIcon entry={entry} size={16} />
-                    {renaming === entry.path ? renameField : (
+                    {renaming?.path === entry.path ? renameField : (
                       <span className="fl-name" title={deepSearch ? entry.path : entry.name}>{entry.name}</span>
                     )}
                   </div>
@@ -790,9 +864,9 @@ export default function Pane({
       {menu && <ContextMenu x={menu.x} y={menu.y} items={menu.items} onClose={() => setMenu(null)} />}
       {batchRename && (
         <BatchRenameDialog
-          entries={selectedEntries}
-          onCancel={() => setBatchRename(false)}
-          onApply={applyBatchRename}
+          entries={batchRename.entries}
+          onCancel={cancelBatchRename}
+          onApply={(renames) => applyBatchRename(renames, batchRename)}
         />
       )}
     </div>
