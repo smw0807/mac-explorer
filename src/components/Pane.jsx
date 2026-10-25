@@ -126,6 +126,20 @@ export default function Pane({
     () => displayed.filter((e) => selection.has(e.path)),
     [displayed, selection]
   );
+  const selectedPaths = useMemo(() => selectedEntries.map((entry) => entry.path), [selectedEntries]);
+
+  useEffect(() => {
+    const visible = new Set(displayed.map((entry) => entry.path));
+    setSelection((previous) => {
+      const next = new Set([...previous].filter((p) => visible.has(p)));
+      return next.size === previous.size ? previous : next;
+    });
+  }, [displayed]);
+
+  useEffect(() => {
+    setMenu(null);
+    anchorRef.current = -1;
+  }, [filter, showHidden, deepSearch]);
 
   /* ---------- actions ---------- */
 
@@ -135,12 +149,12 @@ export default function Pane({
   }, [navigate]);
 
   const doCopy = useCallback(() => {
-    if (selection.size) setClipboard({ mode: 'copy', paths: [...selection] });
-  }, [selection, setClipboard]);
+    if (selectedPaths.length) setClipboard({ mode: 'copy', paths: selectedPaths });
+  }, [selectedPaths, setClipboard]);
 
   const doCut = useCallback(() => {
-    if (selection.size) setClipboard({ mode: 'cut', paths: [...selection] });
-  }, [selection, setClipboard]);
+    if (selectedPaths.length) setClipboard({ mode: 'cut', paths: selectedPaths });
+  }, [selectedPaths, setClipboard]);
 
   const doPaste = useCallback(async () => {
     if (!clipboard) return;
@@ -179,12 +193,12 @@ export default function Pane({
   }, [copyJob?.jobId, load]);
 
   const doTrash = useCallback(async () => {
-    if (!selection.size) return;
-    const res = await window.api.trash([...selection]);
+    if (!selectedPaths.length) return;
+    const res = await window.api.trash(selectedPaths);
     if (!res.ok) alert(res.error);
     setSelection(new Set());
     load();
-  }, [selection, load]);
+  }, [selectedPaths, load]);
 
   const startRename = useCallback(() => {
     const first = selectedEntries[0];
@@ -260,10 +274,10 @@ export default function Pane({
   /* ---------- drag & drop ---------- */
 
   const handleDragStart = useCallback((e, entry) => {
-    const paths = selection.has(entry.path) ? [...selection] : [entry.path];
+    const paths = selectedPaths.includes(entry.path) ? selectedPaths : [entry.path];
     if (!selection.has(entry.path)) setSelection(new Set([entry.path]));
     startDrag(e, paths);
-  }, [selection]);
+  }, [selection, selectedPaths]);
 
   const handleDropOn = useCallback(async (e, destDir) => {
     e.preventDefault();
@@ -298,7 +312,7 @@ export default function Pane({
     e.preventDefault();
     e.stopPropagation();
     onActivate();
-    let sel = selection;
+    let sel = new Set(selectedPaths);
     if (!selection.has(entry.path)) {
       sel = new Set([entry.path]);
       setSelection(sel);
@@ -347,7 +361,7 @@ export default function Pane({
         { label: '경로 복사', onClick: () => window.api.copyTextToClipboard([...sel].join('\n')) },
       ],
     });
-  }, [selection, clipboard, openEntry, doPaste, load, onActivate, onOpenInNewTab, setClipboard]);
+  }, [selection, selectedPaths, clipboard, openEntry, doPaste, load, onActivate, onOpenInNewTab, setClipboard]);
 
   const handleEmptyContext = useCallback((e) => {
     e.preventDefault();
@@ -665,7 +679,7 @@ export default function Pane({
       )}
 
       <div className="statusbar">
-        <span>{displayed.length}개 항목{selection.size > 0 ? ` · ${selection.size}개 선택됨` : ''}</span>
+        <span>{displayed.length}개 항목{selectedPaths.length > 0 ? ` · ${selectedPaths.length}개 선택됨` : ''}</span>
         <span>
           {clipboard ? `클립보드: ${clipboard.paths.length}개 (${clipboard.mode === 'cut' ? '잘라내기' : '복사'})` : ''}
           {disk ? `  여유 공간 ${formatSize(disk.free)}` : ''}
