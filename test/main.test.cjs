@@ -95,3 +95,41 @@ test('text preview closes its descriptor even when reading fails', async () => {
   assert.equal(result.error, 'read failed');
   assert.equal(closed, 1);
 });
+
+for (const mode of ['copy', 'move']) {
+  test(`${mode} returns completed items when a later input fails`, async () => {
+    const operation = mode === 'copy' ? 'copyItem' : 'moveItem';
+    const api = loadMain({ overrides: { './file-operations.cjs': {
+      ...operations,
+      validateBatch: async () => {},
+      [operation]: async (src) => {
+        if (src === '/source/second') throw new Error('second failed');
+        return '/dest/first';
+      },
+    } } });
+    const result = await api.invoke(`fs:${mode}`, ['/source/first', '/source/second'], '/dest');
+    assert.equal(result.ok, false);
+    assert.equal(result.error, 'second failed');
+    assert.deepEqual(mode === 'copy' ? result.created : result.items,
+      mode === 'copy' ? ['/dest/first'] : [{ from: '/source/first', to: '/dest/first' }]);
+  });
+}
+
+test('an EXDEV cleanup failure reports a recovery copy separately from completed moves', async () => {
+  const api = loadMain({ overrides: { './file-operations.cjs': {
+    ...operations,
+    validateBatch: async () => {},
+    moveItem: async () => { throw Object.assign(new Error('source cleanup failed'), { committedDest: '/dest/file' }); },
+  } } });
+  const result = await api.invoke('fs:move', ['/source/file'], '/dest');
+  assert.equal(result.ok, false);
+  assert.deepEqual(result.items, []);
+  assert.deepEqual(result.recovery, [{ from: '/source/file', to: '/dest/file' }]);
+});
+
+test('trash reports the exact successful subset on failure', async () => {
+  const api = loadMain({ shell: { trashItem: async (p) => { if (p === '/second') throw new Error('trash failed'); } } });
+  const result = await api.invoke('fs:trash', ['/first', '/second']);
+  assert.equal(result.ok, false);
+  assert.deepEqual(result.trashed, ['/first']);
+});

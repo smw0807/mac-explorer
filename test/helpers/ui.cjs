@@ -68,6 +68,9 @@ async function flush(action = () => {}) {
 
 async function mountComponent(relativePath, { props = {}, api = {} } = {}) {
   const listeners = { directory: new Set(), copy: new Set() };
+  const alerts = [];
+  const previousAlert = globalThis.alert;
+  globalThis.alert = (message) => alerts.push(message);
   const subscribe = (set) => (callback) => {
     set.add(callback);
     return () => set.delete(callback);
@@ -92,6 +95,7 @@ async function mountComponent(relativePath, { props = {}, api = {} } = {}) {
 
   return {
     container,
+    alerts,
     api: window.api,
     query: (selector) => container.querySelector(selector),
     queryAll: (selector) => [...container.querySelectorAll(selector)],
@@ -110,6 +114,7 @@ async function mountComponent(relativePath, { props = {}, api = {} } = {}) {
       mounted = false;
       await flush(() => root.unmount());
       container.remove();
+      globalThis.alert = previousAlert;
     },
   };
 }

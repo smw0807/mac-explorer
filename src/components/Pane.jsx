@@ -6,7 +6,7 @@ import {
   basename, parentPath, formatSize, formatDate, fileIcon, fileKind,
   sortEntries, isImage, isTextLike, isVideo, isAudio, localFileUrl,
 } from '../util.js';
-import { acceptsDrop, startDrag, dropToDir, resolveConflictMode } from '../dnd.js';
+import { acceptsDrop, startDrag, dropToDir, notifyFsChanged, resolveConflictMode } from '../dnd.js';
 import { recordOp } from '../undo.js';
 
 function Preview({ entry }) {
@@ -240,19 +240,33 @@ export default function Pane({
       return;
     }
     const res = await window.api.move(clipboard.paths, path, opts);
+    const recoverySources = new Set((res.recovery || []).map((item) => item.from));
+    const moved = (res.items || []).filter((item) => !recoverySources.has(item.from));
+    if (moved.length) recordOp({ type: 'move', items: moved });
+    const completed = new Set([...moved.map((item) => item.from), ...recoverySources]);
+    if (completed.size) {
+      setClipboard((previous) => {
+        if (previous !== clipboard) return previous;
+        const paths = previous.paths.filter((p) => !completed.has(p));
+        return paths.length ? { ...previous, paths } : null;
+      });
+    }
+    notifyFsChanged([...new Set([path, ...clipboard.paths.map(parentPath)])]);
     if (!res.ok) alert(res.error);
-    else if (res.items?.length) recordOp({ type: 'move', items: res.items });
-    setClipboard(null);
-    load();
-  }, [clipboard, path, setClipboard, startCopy, load]);
+  }, [clipboard, path, setClipboard, startCopy]);
 
-  const doTrash = useCallback(async () => {
-    if (!selectedPaths.length) return;
-    const res = await window.api.trash(selectedPaths);
+  const trashPaths = useCallback(async (paths) => {
+    if (!paths.length) return;
+    const res = await window.api.trash(paths);
+    const trashed = new Set(res.trashed || (res.ok ? paths : []));
+    if (trashed.size) {
+      setSelection((previous) => new Set([...previous].filter((p) => !trashed.has(p))));
+      notifyFsChanged([...new Set([...trashed].map(parentPath))]);
+    }
     if (!res.ok) alert(res.error);
-    setSelection(new Set());
-    load();
-  }, [selectedPaths, load]);
+  }, []);
+
+  const doTrash = useCallback(() => trashPaths(selectedPaths), [selectedPaths, trashPaths]);
 
   const startRename = useCallback(() => {
     const first = selectedEntries[0];
@@ -277,7 +291,8 @@ export default function Pane({
     const res = await window.api.mkdir(path, '새 폴더');
     if (res.ok) {
       recordOp({ type: 'create', path: res.path });
-      if (!await load()) return;
+      await load();
+      if (!mountedRef.current || path !== currentPathRef.current) return;
       setSelection(new Set([res.path]));
       setRenaming(res.path);
       setRenameValue(basename(res.path));
@@ -288,7 +303,8 @@ export default function Pane({
     const res = await window.api.newFile(path, '새 파일.txt');
     if (res.ok) {
       recordOp({ type: 'create', path: res.path });
-      if (!await load()) return;
+      await load();
+      if (!mountedRef.current || path !== currentPathRef.current) return;
       setSelection(new Set([res.path]));
       setRenaming(res.path);
       setRenameValue(basename(res.path));
@@ -402,12 +418,7 @@ export default function Pane({
         { separator: true },
         { label: '이름 바꾸기', shortcut: 'F2', disabled: multi, onClick: () => { setRenaming(entry.path); setRenameValue(entry.name); } },
         ...(multi ? [{ label: '일괄 이름 변경…', onClick: () => setBatchRename(true) }] : []),
-        { label: '휴지통으로 이동', shortcut: '⌘⌫', onClick: async () => {
-            const res = await window.api.trash([...sel]);
-            if (!res.ok) alert(res.error);
-            setSelection(new Set());
-            load();
-          } },
+        { label: '휴지통으로 이동', shortcut: '⌘⌫', onClick: () => trashPaths([...sel]) },
         { separator: true },
         { label: '압축하기', onClick: async () => {
             const res = await window.api.compress([...sel]);
@@ -425,7 +436,7 @@ export default function Pane({
         { label: '경로 복사', onClick: () => window.api.copyTextToClipboard([...sel].join('\n')) },
       ],
     });
-  }, [selection, selectedPaths, clipboard, openEntry, doPaste, load, onActivate, onOpenInNewTab, setClipboard]);
+  }, [selection, selectedPaths, clipboard, openEntry, doPaste, load, onActivate, onOpenInNewTab, setClipboard, trashPaths]);
 
   const handleEmptyContext = useCallback((e) => {
     e.preventDefault();

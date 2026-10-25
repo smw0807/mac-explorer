@@ -144,15 +144,15 @@ ipcMain.handle('ui:confirmConflict', async (e, names) => {
 });
 
 ipcMain.handle('fs:copy', async (_e, paths, destDir, opts = {}) => {
+  const created = [];
   try {
     await validateBatch(paths, destDir, opts);
-    const created = [];
     for (const p of paths) {
-      const dest = await copyItem(p, destDir, opts);
+      const dest = await copyItem(p, destDir, { ...opts, protectedDestinations: [...paths, ...created] });
       if (dest) created.push(dest);
     }
     return ok({ created });
-  } catch (err) { return fail(err); }
+  } catch (err) { return { ...fail(err), created }; }
 });
 
 /* ---------- copy with progress ---------- */
@@ -185,7 +185,7 @@ ipcMain.handle('fs:copyStart', (e, paths, destDir, opts = {}) => {
       send();
       for (const p of paths) {
         if (job.canceled) throw cancelError();
-        const dest = await copyItem(p, destDir, { ...opts, job, report });
+        const dest = await copyItem(p, destDir, { ...opts, job, report, protectedDestinations: [...paths, ...created] });
         if (dest) created.push(dest);
       }
       clearInterval(timer);
@@ -209,30 +209,38 @@ ipcMain.handle('fs:copyCancel', (_e, jobId) => {
 });
 
 ipcMain.handle('fs:move', async (_e, paths, destDir, opts = {}) => {
+  const items = [];
+  const recovery = [];
   try {
     await validateBatch(paths, destDir, opts);
-    const items = [];
     for (const p of paths) {
-      const dest = await moveItem(p, destDir, opts);
-      if (dest) items.push({ from: p, to: dest });
+      try {
+        const dest = await moveItem(p, destDir, { ...opts, protectedDestinations: [...paths, ...items.map((item) => item.to)] });
+        if (dest) items.push({ from: p, to: dest });
+      } catch (err) {
+        if (err.committedDest) recovery.push({ from: p, to: err.committedDest });
+        throw err;
+      }
     }
     return ok({ items });
-  } catch (err) { return fail(err); }
+  } catch (err) { return { ...fail(err), items, recovery }; }
 });
 
 ipcMain.handle('fs:trash', async (_e, paths) => {
+  const trashed = [];
   try {
-    for (const p of paths) await shell.trashItem(p);
-    return ok({});
-  } catch (err) { return fail(err); }
+    for (const p of paths) {
+      await shell.trashItem(p);
+      trashed.push(p);
+    }
+    return ok({ trashed });
+  } catch (err) { return { ...fail(err), trashed }; }
 });
 
 ipcMain.handle('fs:rename', async (_e, p, newName) => {
   try {
-    const dest = path.join(path.dirname(p), newName);
-    if (await statEntry(dest)) throw new Error(`이미 존재합니다: ${newName}`);
-    await fsp.rename(p, dest);
-    return ok({ path: dest });
+    const dest = await moveItem(p, path.dirname(p), { name: newName });
+    return ok({ path: dest || p });
   } catch (err) { return fail(err); }
 });
 

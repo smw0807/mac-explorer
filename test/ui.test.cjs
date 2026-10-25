@@ -463,3 +463,127 @@ test('unmount invalidates pending reads and searches without issuing follow-up d
   assert.deepEqual(stats, []);
   assert.equal(ui.container.isConnected, false);
 });
+
+test('cut paste retains failed and skipped sources, excludes recovery copies, and undoes only completed moves', async (t) => {
+  const sources = [file('a.txt'), file('b.txt'), file('c.txt')];
+  const pasted = [];
+  const restored = [];
+  const ui = await mountApp({
+    api: {
+      readDir: async (directory) => ({ ok: true, entries: directory === '/test' ? sources : [] }),
+      move: async (paths, directory, options) => {
+        if (options.name) {
+          restored.push(paths);
+          return { ok: true, items: [{ from: paths[0], to: `${directory}/${options.name}` }] };
+        }
+        pasted.push(paths);
+        if (pasted.length === 1) return {
+          ok: false,
+          items: [{ from: '/test/a.txt', to: '/test/Downloads/a.txt' }],
+          recovery: [{ from: '/test/b.txt', to: '/test/Downloads/b.txt' }],
+          error: '복구용 완성본: /test/Downloads/b.txt',
+        };
+        if (pasted.length === 2) return { ok: true, items: [] };
+        return { ok: true, items: [{ from: '/test/c.txt', to: '/test/Downloads/c.txt' }] };
+      },
+    },
+  });
+  t.after(() => ui.unmount());
+  await key(visiblePane(ui), 'a', { metaKey: true });
+  await key(visiblePane(ui), 'x', { metaKey: true });
+  await click(ui.queryAll('.sb-item').find((node) => node.textContent.includes('다운로드')));
+  await key(visiblePane(ui), 'v', { metaKey: true });
+  assert.match(visiblePane(ui).querySelector('.statusbar').textContent, /클립보드: 1개 \(잘라내기\)/);
+  assert.match(ui.alerts[0], /복구용 완성본/);
+  await key(visiblePane(ui), 'v', { metaKey: true });
+  assert.match(visiblePane(ui).querySelector('.statusbar').textContent, /클립보드: 1개 \(잘라내기\)/);
+  await key(visiblePane(ui), 'v', { metaKey: true });
+  assert.doesNotMatch(visiblePane(ui).querySelector('.statusbar').textContent, /클립보드:/);
+  assert.deepEqual(pasted, [['/test/a.txt', '/test/b.txt', '/test/c.txt'], ['/test/c.txt'], ['/test/c.txt']]);
+  await key(visiblePane(ui), 'z', { metaKey: true });
+  await key(visiblePane(ui), 'z', { metaKey: true });
+  await key(visiblePane(ui), 'z', { metaKey: true });
+  assert.deepEqual(restored, [['/test/Downloads/c.txt'], ['/test/Downloads/a.txt']]);
+});
+
+test('a delayed cut paste does not replace a newer clipboard selection', async (t) => {
+  const moved = deferred();
+  const copies = [];
+  const ui = await mountApp({
+    api: {
+      readDir: async (directory) => ({ ok: true, entries: directory === '/test' ? [file('source.txt')] : [file('new-copy.txt', { path: '/test/Downloads/new-copy.txt' })] }),
+      move: () => moved.promise,
+      copyStart: async (paths) => { copies.push(paths); return { ok: true, jobId: 901 }; },
+    },
+  });
+  t.after(() => ui.unmount());
+  await click(visiblePane(ui).querySelector('.fl-row'));
+  await key(visiblePane(ui), 'x', { metaKey: true });
+  await click(ui.queryAll('.sb-item').find((node) => node.textContent.includes('다운로드')));
+  await key(visiblePane(ui), 'v', { metaKey: true });
+  await click(visiblePane(ui).querySelector('.fl-row'));
+  await key(visiblePane(ui), 'c', { metaKey: true });
+  await flush(() => moved.resolve({ ok: true, items: [{ from: '/test/source.txt', to: '/test/Downloads/source.txt' }] }));
+  assert.match(visiblePane(ui).querySelector('.statusbar').textContent, /클립보드: 1개 \(복사\)/);
+  await key(visiblePane(ui), 'v', { metaKey: true });
+  assert.deepEqual(copies, [['/test/Downloads/new-copy.txt']]);
+  await ui.emitCopy({ jobId: 901, done: true, canceled: true, created: [], destDir: '/test/Downloads' });
+});
+
+test('partial trash through the context menu keeps unsuccessful selections available for retry', async (t) => {
+  let entries = [file('a.txt'), file('b.txt')];
+  const calls = [];
+  const ui = await mountPane({
+    api: {
+      readDir: async () => ({ ok: true, entries }),
+      trash: async (paths) => {
+        calls.push(paths);
+        if (calls.length === 1) {
+          entries = [file('b.txt')];
+          return { ok: false, trashed: ['/test/a.txt'], error: 'b is busy' };
+        }
+        entries = [];
+        return { ok: true, trashed: paths };
+      },
+    },
+  });
+  t.after(() => ui.unmount());
+  await key(ui.query('.pane'), 'a', { metaKey: true });
+  await flush(() => ui.query('.fl-row').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true })));
+  await click(ui.queryAll('.cm-item').find((node) => node.textContent.includes('휴지통으로 이동')));
+  assert.deepEqual(displayedNames(ui), ['b.txt']);
+  assert.match(ui.query('.statusbar').textContent, /1개 선택됨/);
+  assert.match(ui.alerts[0], /b is busy/);
+  await key(ui.query('.pane'), 'Delete');
+  assert.deepEqual(calls, [['/test/a.txt', '/test/b.txt'], ['/test/b.txt']]);
+  assert.deepEqual(displayedNames(ui), []);
+});
+
+for (const kind of ['folder', 'file']) {
+  test(`new ${kind} enters rename mode even when a watcher refresh supersedes its own reload`, async (t) => {
+    const created = kind === 'folder' ? file('새 폴더', { isDir: true }) : file('새 파일.txt');
+    const oldReload = deferred();
+    let reads = 0;
+    const ui = await mountPane({
+      api: {
+        readDir: () => {
+          reads += 1;
+          if (reads === 1) return Promise.resolve({ ok: true, entries: [] });
+          if (reads === 2) return oldReload.promise;
+          return Promise.resolve({ ok: true, entries: [created] });
+        },
+        mkdir: async () => ({ ok: true, path: created.path }),
+        newFile: async () => ({ ok: true, path: created.path }),
+      },
+    });
+    t.after(() => ui.unmount());
+    if (kind === 'folder') await key(ui.query('.pane'), 'N', { metaKey: true, shiftKey: true });
+    else {
+      await flush(() => ui.query('.filelist').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true })));
+      await click(ui.queryAll('.cm-item').find((node) => node.textContent === '새 파일'));
+    }
+    await ui.emitDirectory({ paneId: 'test-pane', dir: '/test' });
+    await flush(() => oldReload.resolve({ ok: true, entries: [created] }));
+    assert.equal(ui.query('.rename-input')?.value, created.name);
+  });
+}

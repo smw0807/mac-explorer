@@ -23,26 +23,41 @@ function contains(parent, child) {
   return relative === '' || (!relative.startsWith('..' + path.sep) && relative !== '..' && !path.isAbsolute(relative));
 }
 
-async function planDestination(src, destDir, conflict, moving) {
+async function planDestination(src, destDir, conflict, moving, name, protectedDestinations = []) {
   src = path.resolve(src);
   const sourceParent = await fsp.realpath(path.dirname(src));
   const source = path.join(sourceParent, path.basename(src));
   const dir = await fsp.realpath(destDir);
   const sourceStat = await fsp.lstat(source);
+  const destName = name ?? path.basename(source);
+  if (typeof destName !== 'string' || !destName || destName === '.' || destName === '..'
+    || destName.includes('/') || destName.includes('\0')) throw new Error('올바른 파일 이름을 입력해주세요.');
   if (sourceStat.isDirectory() && contains(await fsp.realpath(source), dir)) {
     throw new Error('폴더 자신이나 하위 폴더로 복사·이동할 수 없습니다.');
   }
-  if (moving && sourceParent === dir) return null;
-  let dest = path.join(dir, path.basename(source));
-  if (sourceParent === dir) dest = await uniqueDest(dir, path.basename(source));
+  if (moving && sourceParent === dir && destName === path.basename(source)) return null;
+  let dest = path.join(dir, destName);
+  if (!moving && sourceParent === dir) dest = await uniqueDest(dir, destName);
   let existing = await statEntry(dest);
+  // On case-insensitive volumes, a case-only rename resolves to the source entry.
+  // A separately named hard link is still a real conflict and must be preserved.
+  if (moving && sourceParent === dir && existing
+    && existing.dev === sourceStat.dev && existing.ino === sourceStat.ino
+    && !(await fsp.readdir(dir)).includes(destName)) existing = null;
   if (existing) {
     if (conflict === 'skip') return null;
     if (conflict === 'keepBoth') {
-      dest = await uniqueDest(dir, path.basename(source));
+      dest = await uniqueDest(dir, destName);
       existing = null;
     } else if (conflict !== 'overwrite') {
       throw new Error(`이미 존재합니다: ${path.basename(source)}`);
+    } else {
+      for (const previous of protectedDestinations) {
+        const protectedStat = await statEntry(previous);
+        if (protectedStat && existing.dev === protectedStat.dev && existing.ino === protectedStat.ino) {
+          throw new Error('선택한 원본이나 이번 작업에서 이미 처리한 항목을 덮어쓸 수 없습니다.');
+        }
+      }
     }
   }
   if (existing?.isDirectory() && contains(await fsp.realpath(dest), source)) {
@@ -57,11 +72,19 @@ async function validateBatch(paths, destDir, opts = {}) {
     path.join(await fsp.realpath(path.dirname(path.resolve(src))), path.basename(src))));
   // One replacement must never delete another selected source in the same batch.
   if (opts.conflict === 'overwrite') {
+    const destinations = new Map();
     for (const source of sources) {
-      const dest = path.join(dir, path.basename(source));
+      const dest = path.join(dir, opts.name ?? path.basename(source));
+      if (destinations.has(dest) && destinations.get(dest) !== source) {
+        throw new Error('선택한 항목들의 대상 이름이 같습니다. 둘 다 유지를 선택해주세요.');
+      }
+      destinations.set(dest, source);
+      if (sources.some((other) => other !== source && other === dest)) {
+        throw new Error('선택한 원본을 덮어쓸 수 없습니다.');
+      }
       if ((await statEntry(dest))?.isDirectory()) {
         const actual = await fsp.realpath(dest);
-        if (sources.some((other) => other !== dest && contains(actual, other))) {
+        if (sources.some((other) => (other !== source || other !== dest) && contains(actual, other))) {
           throw new Error('선택한 원본을 포함한 폴더를 덮어쓸 수 없습니다.');
         }
       }
@@ -125,7 +148,7 @@ function sameEntry(a, b) {
 }
 
 async function transferItem(src, destDir, opts, moving, writer = copyTree) {
-  const plan = await planDestination(src, destDir, opts.conflict, moving);
+  const plan = await planDestination(src, destDir, opts.conflict, moving, opts.name, opts.protectedDestinations);
   if (!plan) return null;
   const { source, dest, existing } = plan;
   checkCanceled(opts.job);
@@ -176,7 +199,10 @@ async function transferItem(src, destDir, opts, moving, writer = copyTree) {
         err.message += ` 원본 복구 위치: ${staged} (${restoreError.message})`;
       }
     }
-    if (committed) err.committedDest = dest;
+    if (committed) {
+      err.committedDest = dest;
+      err.message += ` 완전한 복사본이 보존된 위치: ${dest}`;
+    }
     throw err;
   } finally {
     if (!preserveWorkspace) await fsp.rm(workspace, { recursive: true, force: true }).catch(() => {});

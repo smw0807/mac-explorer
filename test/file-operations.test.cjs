@@ -347,7 +347,7 @@ test('EXDEV source cleanup failure preserves the fully committed destination', a
     },
   } });
   await assert.rejects(isolated.moveItem(source, destDir, { conflict: 'overwrite' }), (err) => {
-    return err.code === 'EACCES' && err.committedDest === dest;
+    return err.code === 'EACCES' && err.committedDest === dest && err.message.includes(dest);
   });
   await assertText(source, 'new contents');
   await assertText(dest, 'new contents');
@@ -442,4 +442,160 @@ test('batch validation protects another selected source inside an overwritten di
   await assertText(otherSource, 'selected original');
   assert.deepEqual(await fsp.readdir(existing), ['selected.txt']);
   await assertNoWorkspace(destDir);
+});
+
+test('move with an explicit name restores the exact original basename', async (t) => {
+  const { sourceDir, destDir } = await fixture(t);
+  const source = path.join(sourceDir, 'document copy.txt');
+  const expected = path.join(destDir, 'document.txt');
+  await fsp.writeFile(source, 'restored contents');
+  assert.equal(await operations.moveItem(source, destDir, { name: 'document.txt' }), expected);
+  await assertText(expected, 'restored contents');
+  await assertMissing(source);
+  await assertMissing(path.join(destDir, 'document copy.txt'));
+  await assertNoWorkspace(destDir);
+});
+
+test('move with an explicit name can rename within the same directory', async (t) => {
+  const { sourceDir } = await fixture(t);
+  const source = path.join(sourceDir, 'before.txt');
+  const expected = path.join(sourceDir, 'after.txt');
+  await fsp.writeFile(source, 'contents');
+  assert.equal(await operations.moveItem(source, sourceDir, { name: 'after.txt' }), expected);
+  await assertText(expected, 'contents');
+  await assertMissing(source);
+  assert.deepEqual(await fsp.readdir(sourceDir), ['after.txt']);
+});
+
+test('restoring an exact name refuses to replace an existing original file', async (t) => {
+  const { sourceDir, destDir } = await fixture(t);
+  const source = path.join(sourceDir, 'document copy.txt');
+  const original = path.join(destDir, 'document.txt');
+  await fsp.writeFile(source, 'contents to restore');
+  await fsp.writeFile(original, 'new file at original location');
+  await assert.rejects(operations.moveItem(source, destDir, { name: 'document.txt' }), /이미 존재/);
+  await assertText(source, 'contents to restore');
+  await assertText(original, 'new file at original location');
+  assert.deepEqual(await fsp.readdir(destDir), ['document.txt']);
+});
+
+test('invalid explicit names are rejected before moving the source', async (t) => {
+  const { sourceDir, destDir } = await fixture(t);
+  const source = path.join(sourceDir, 'item.txt');
+  await fsp.writeFile(source, 'original contents');
+  for (const name of ['', '.', '..', '../outside', '/absolute', 'nested/item', 'nul\0name', 42, false, {}, []]) {
+    await assert.rejects(operations.moveItem(source, destDir, { name }), /올바른 파일 이름/);
+  }
+  await assertText(source, 'original contents');
+  assert.deepEqual(await fsp.readdir(destDir), []);
+});
+
+test('batch overwrite protects a selected file that is also another item destination', async (t) => {
+  const { root, source, dest, destDir } = await pair(t);
+  const alias = path.join(root, 'destination-alias');
+  await fsp.symlink(destDir, alias);
+  for (const paths of [[source, dest], [dest, source], [source, path.join(alias, 'item.txt')]]) {
+    await assert.rejects(operations.validateBatch(paths, destDir, { conflict: 'overwrite' }), /선택한/);
+  }
+  await operations.validateBatch([source, dest], destDir, { conflict: 'keepBoth' });
+  await assertText(source, 'new contents');
+  await assertText(dest, 'existing contents');
+  await assertNoWorkspace(destDir);
+});
+
+test('batch overwrite protects selected files when an explicit destination name is used', async (t) => {
+  const { sourceDir, destDir } = await fixture(t);
+  const source = path.join(sourceDir, 'renamed.txt');
+  const selected = path.join(destDir, 'original.txt');
+  await fsp.writeFile(source, 'restoration contents');
+  await fsp.writeFile(selected, 'selected original');
+  await assert.rejects(operations.validateBatch([source, selected], destDir, {
+    name: 'original.txt', conflict: 'overwrite',
+  }), /선택한 원본/);
+  await assertText(source, 'restoration contents');
+  await assertText(selected, 'selected original');
+});
+
+test('batch overwrite rejects different sources that would replace the same destination', async (t) => {
+  const { root, sourceDir, destDir } = await fixture(t);
+  const otherDir = path.join(root, 'other');
+  await fsp.mkdir(otherDir);
+  const first = path.join(sourceDir, 'same.txt');
+  const second = path.join(otherDir, 'same.txt');
+  await fsp.writeFile(first, 'first selected contents');
+  await fsp.writeFile(second, 'second selected contents');
+  await fsp.writeFile(path.join(destDir, 'same.txt'), 'existing contents');
+  for (const paths of [[first, second], [second, first]]) {
+    await assert.rejects(operations.validateBatch(paths, destDir, { conflict: 'overwrite' }));
+  }
+  await operations.validateBatch([first, second], destDir, { conflict: 'keepBoth' });
+  await assertText(first, 'first selected contents');
+  await assertText(second, 'second selected contents');
+  await assertText(path.join(destDir, 'same.txt'), 'existing contents');
+});
+
+test('batch overwrite rejects distinct names planned for the same explicit name', async (t) => {
+  const { sourceDir, destDir } = await fixture(t);
+  const first = path.join(sourceDir, 'first.txt');
+  const second = path.join(sourceDir, 'second.txt');
+  await fsp.writeFile(first, 'first contents');
+  await fsp.writeFile(second, 'second contents');
+  await assert.rejects(operations.validateBatch([first, second], destDir, {
+    name: 'restored.txt', conflict: 'overwrite',
+  }));
+  await assertText(first, 'first contents');
+  await assertText(second, 'second contents');
+  assert.deepEqual(await fsp.readdir(destDir), []);
+});
+
+test('overwrite protects a selected source reached through a different hard link', async (t) => {
+  const { root, source, dest, destDir } = await pair(t);
+  const selectedAlias = path.join(root, 'selected-original.txt');
+  await fsp.link(dest, selectedAlias);
+  await assert.rejects(operations.moveItem(source, destDir, {
+    conflict: 'overwrite', protectedDestinations: [selectedAlias],
+  }), /선택한 원본이나 이번 작업/);
+  await assertText(source, 'new contents');
+  await assertText(dest, 'existing contents');
+  await assertText(selectedAlias, 'existing contents');
+  await assertNoWorkspace(destDir);
+});
+
+test('overwrite protects a completed destination through a case-insensitive alias', async (t) => {
+  const { root, sourceDir, destDir } = await fixture(t);
+  const otherDir = path.join(root, 'other');
+  const first = path.join(sourceDir, 'Report.txt');
+  await fsp.mkdir(otherDir);
+  await fsp.writeFile(first, 'first selected contents');
+  const originalStat = await fsp.stat(first);
+  const aliasStat = await operations.statEntry(path.join(sourceDir, 'report.txt'));
+  if (!aliasStat || aliasStat.dev !== originalStat.dev || aliasStat.ino !== originalStat.ino) {
+    t.skip('fixture filesystem uses case-sensitive filenames');
+    return;
+  }
+  const second = path.join(otherDir, 'report.txt');
+  await fsp.writeFile(second, 'second selected contents');
+  const completed = await operations.moveItem(first, destDir);
+  await assert.rejects(operations.moveItem(second, destDir, {
+    conflict: 'overwrite', protectedDestinations: [completed],
+  }), /선택한 원본이나 이번 작업/);
+  await assertMissing(first);
+  await assertText(completed, 'first selected contents');
+  await assertText(second, 'second selected contents');
+  await assertNoWorkspace(destDir);
+});
+
+test('renaming only letter case succeeds without replacing a separate hard link', async (t) => {
+  const { sourceDir } = await fixture(t);
+  const source = path.join(sourceDir, 'Original.txt');
+  await fsp.writeFile(source, 'contents');
+  const renamed = await operations.moveItem(source, sourceDir, { name: 'original.txt' });
+  assert.equal(renamed, path.join(sourceDir, 'original.txt'));
+  assert.deepEqual(await fsp.readdir(sourceDir), ['original.txt']);
+  await assertText(renamed, 'contents');
+  const hardLink = path.join(sourceDir, 'distinct.txt');
+  await fsp.link(renamed, hardLink);
+  await assert.rejects(operations.moveItem(renamed, sourceDir, { name: 'distinct.txt' }));
+  await assertText(renamed, 'contents');
+  await assertText(hardLink, 'contents');
 });

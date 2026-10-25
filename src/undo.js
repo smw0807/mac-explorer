@@ -7,49 +7,67 @@ import { notifyFsChanged } from './dnd.js';
 // create: {type:'create', path}
 const stack = [];
 const MAX = 50;
+let activeUndo = null;
 
 export function recordOp(op) {
-  stack.push(op);
-  if (stack.length > MAX) stack.shift();
+  let remaining;
+  if (op.type === 'move' || op.type === 'renameBatch') remaining = op.items.map((item) => ({ ...item }));
+  else if (op.type === 'copy') remaining = [...op.created];
+  else if (op.type === 'create') remaining = [op.path];
+  else if (op.type === 'rename') remaining = [{ from: op.from, to: op.to }];
+  else return;
+  if (!remaining.length) return;
+  stack.push({ type: op.type, remaining });
+  if (stack.length > MAX) stack.splice(stack.findIndex((entry) => entry !== activeUndo), 1);
 }
 
 // 마지막 작업을 되돌린다. 되돌린 작업 type 반환, 스택이 비었으면 null.
 export async function undoLast() {
-  const op = stack.pop();
+  if (activeUndo) return null;
+  const op = stack[stack.length - 1];
   if (!op) return null;
+  activeUndo = op;
   const affected = new Set();
   try {
-    if (op.type === 'move') {
-      for (const { from, to } of op.items) {
-        const dir = parentPath(from);
-        const r = await window.api.move([to], dir, { conflict: 'keepBoth' });
-        if (!r.ok) throw new Error(r.error);
-        // 이동 당시 keepBoth로 이름이 바뀌었던 항목은 원래 이름으로 복구
-        const landed = r.items[0]?.to;
-        if (landed && basename(landed) !== basename(from)) {
-          await window.api.rename(landed, basename(from));
+    while (op.remaining.length) {
+      const item = op.remaining[op.remaining.length - 1];
+      let result;
+      let completed;
+      let dirs;
+      if (op.type === 'move') {
+        result = await window.api.move([item.to], parentPath(item.from), { name: basename(item.from) });
+        completed = result.items?.some((moved) => moved.from === item.to && moved.to === item.from);
+        dirs = [parentPath(item.from), parentPath(item.to)];
+        // A failed cross-volume cleanup may still have changed both locations.
+        for (const recovery of result.recovery || []) {
+          affected.add(parentPath(recovery.from));
+          affected.add(parentPath(recovery.to));
         }
-        affected.add(dir);
-        affected.add(parentPath(to));
+      } else if (op.type === 'copy' || op.type === 'create') {
+        result = await window.api.trash([item]);
+        completed = result.ok || result.trashed?.includes(item);
+        dirs = [parentPath(item)];
+      } else {
+        result = await window.api.rename(item.to, basename(item.from));
+        completed = result.ok;
+        dirs = [parentPath(item.from), parentPath(item.to)];
       }
-    } else if (op.type === 'copy' || op.type === 'create') {
-      const paths = op.type === 'copy' ? op.created : [op.path];
-      const r = await window.api.trash(paths);
-      if (!r.ok) throw new Error(r.error);
-      paths.forEach((p) => affected.add(parentPath(p)));
-    } else if (op.type === 'rename') {
-      const r = await window.api.rename(op.to, basename(op.from));
-      if (!r.ok) throw new Error(r.error);
-      affected.add(parentPath(op.from));
-    } else if (op.type === 'renameBatch') {
-      for (const { from, to } of [...op.items].reverse()) {
-        const r = await window.api.rename(to, basename(from));
-        if (!r.ok) throw new Error(r.error);
-        affected.add(parentPath(from));
+      if (completed) {
+        op.remaining.pop();
+        dirs.forEach((dir) => affected.add(dir));
       }
+      if (!result.ok) throw new Error(result.error || '파일 작업에 실패했습니다.');
+      if (!completed) throw new Error('항목이 원래 경로로 복원되지 않았습니다.');
     }
   } catch (err) {
     alert('실행 취소 실패: ' + (err.message || err));
+  } finally {
+    // A new operation may have been recorded while an IPC request was pending.
+    if (!op.remaining.length) {
+      const index = stack.indexOf(op);
+      if (index !== -1) stack.splice(index, 1);
+    }
+    activeUndo = null;
   }
   if (affected.size) notifyFsChanged([...affected]);
   return op.type;
