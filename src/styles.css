@@ -59,6 +59,7 @@ html, body, #root {
 /* ---------- layout ---------- */
 .body { display: flex; flex: 1; min-height: 0; }
 .panes { display: flex; flex: 1; min-width: 0; }
+.panes[hidden] { display: none; }
 .panes.dual .pane { width: 50%; }
 .panes.dual .pane + .pane { border-left: 1px solid var(--border); }
 
@@ -245,6 +246,7 @@ html, body, #root {
 .preview-name { color: var(--text); font-weight: 600; word-break: break-all; }
 
 /* ---------- copy progress ---------- */
+.copy-jobs { max-height: 180px; overflow-y: auto; flex-shrink: 0; }
 .copy-progress {
   display: flex; align-items: center; gap: 10px;
   padding: 6px 12px;
@@ -260,6 +262,7 @@ html, body, #root {
 .cp-fill { height: 100%; background: var(--accent); transition: width 0.1s linear; }
 .cp-cancel { background: none; border: none; color: var(--text-dim); cursor: pointer; font-size: 11px; }
 .cp-cancel:hover { color: var(--text); }
+.cp-cancel:disabled { opacity: 0.5; cursor: default; }
 
 /* ---------- statusbar ---------- */
 .statusbar {

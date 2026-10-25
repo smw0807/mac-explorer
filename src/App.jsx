@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import Sidebar from './components/Sidebar.jsx';
 import Pane from './components/Pane.jsx';
-import { basename, nextId } from './util.js';
+import { basename, formatSize, nextId } from './util.js';
 import { undoLast } from './undo.js';
+import useCopyJobs from './hooks/useCopyJobs.js';
 
 function makePane(path) { return { id: nextId(), initialPath: path }; }
 function makeTab(path) { return { id: nextId(), dual: false, panes: [makePane(path)] }; }
@@ -29,6 +30,7 @@ export default function App() {
   const [favorites, setFavorites] = useState(null);
   const navigators = useRef({});
   const saveTimer = useRef(null);
+  const { jobs: copyJobs, startCopy, cancelCopy } = useCopyJobs();
 
   useEffect(() => {
     (async () => {
@@ -100,7 +102,8 @@ export default function App() {
   const activeTab = tabs.find((t) => t.id === activeTabId);
 
   const registerNavigator = useCallback((paneId, fn) => {
-    navigators.current[paneId] = fn;
+    if (fn) navigators.current[paneId] = fn;
+    else delete navigators.current[paneId];
   }, []);
 
   const onPathChange = useCallback((paneId, path) => {
@@ -216,25 +219,47 @@ export default function App() {
           onAddFavorite={addFavorite}
           onRemoveFavorite={removeFavorite}
         />
-        <div className={`panes ${activeTab?.dual ? 'dual' : ''}`}>
-          {activeTab?.panes.map((pane) => (
-            <Pane
-              key={pane.id}
-              paneId={pane.id}
-              initialPath={pane.initialPath}
-              active={pane.id === activePaneId}
-              onActivate={() => setActivePaneId(pane.id)}
-              clipboard={clipboard}
-              setClipboard={setClipboard}
-              showHidden={showHidden}
-              registerNavigator={registerNavigator}
-              onPathChange={onPathChange}
-              onOpenInNewTab={addTab}
-              special={special}
-            />
+        {tabs.map((tab) => (
+          <div key={tab.id} className={`panes ${tab.dual ? 'dual' : ''}`} hidden={tab.id !== activeTabId}>
+            {tab.panes.map((pane) => (
+              <Pane
+                key={pane.id}
+                paneId={pane.id}
+                initialPath={pane.initialPath}
+                active={tab.id === activeTabId && pane.id === activePaneId}
+                onActivate={() => setActivePaneId(pane.id)}
+                clipboard={clipboard}
+                setClipboard={setClipboard}
+                startCopy={startCopy}
+                showHidden={showHidden}
+                registerNavigator={registerNavigator}
+                onPathChange={onPathChange}
+                onOpenInNewTab={addTab}
+                special={special}
+              />
+            ))}
+          </div>
+        ))}
+      </div>
+      {copyJobs.length > 0 && (
+        <div className="copy-jobs" aria-label="복사 작업">
+          {copyJobs.map((job) => (
+            <div className="copy-progress" key={job.jobId} data-job-id={job.jobId}>
+              <span className="cp-info" title={job.destDir}>
+                복사 중… {job.currentFile ? basename(job.currentFile) : '준비 중'}
+                {job.destDir && ` → ${basename(job.destDir)}`}
+                {job.total > 0 && ` (${formatSize(job.copied) || '0 B'} / ${formatSize(job.total)})`}
+              </span>
+              <div className="cp-bar">
+                <div className="cp-fill" style={{ width: `${job.total ? Math.min(100, (job.copied / job.total) * 100) : 0}%` }} />
+              </div>
+              <button className="cp-cancel" disabled={job.canceling} onClick={() => cancelCopy(job.jobId)}>
+                {job.canceling ? '취소 중…' : '취소'}
+              </button>
+            </div>
           ))}
         </div>
-      </div>
+      )}
     </div>
   );
 }

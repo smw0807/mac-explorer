@@ -6,7 +6,7 @@ import {
   basename, parentPath, formatSize, formatDate, fileIcon, fileKind,
   sortEntries, isImage, isTextLike, isVideo, isAudio, localFileUrl,
 } from '../util.js';
-import { acceptsDrop, startDrag, dropToDir, notifyFsChanged, resolveConflictMode } from '../dnd.js';
+import { acceptsDrop, startDrag, dropToDir, resolveConflictMode } from '../dnd.js';
 import { recordOp } from '../undo.js';
 
 function Preview({ entry }) {
@@ -41,7 +41,7 @@ function Preview({ entry }) {
 
 export default function Pane({
   paneId, initialPath, active, onActivate,
-  clipboard, setClipboard, showHidden,
+  clipboard, setClipboard, startCopy, showHidden,
   registerNavigator, onPathChange, onOpenInNewTab, special,
 }) {
   const [hist, setHist] = useState({ stack: [initialPath], idx: 0 });
@@ -62,7 +62,6 @@ export default function Pane({
   const [menu, setMenu] = useState(null); // {x, y, items}
   const [disk, setDisk] = useState(null);
   const [dragOver, setDragOver] = useState(null); // folder path or '' (pane background)
-  const [copyJob, setCopyJob] = useState(null); // {jobId, copied, total, currentFile}
   const [batchRename, setBatchRename] = useState(false);
   const rootRef = useRef(null);
   const addressInputRef = useRef(null);
@@ -81,7 +80,10 @@ export default function Pane({
     setAddressEdit(false);
   }, []);
 
-  useEffect(() => { registerNavigator(paneId, navigate); }, [paneId, navigate, registerNavigator]);
+  useEffect(() => {
+    registerNavigator(paneId, navigate);
+    return () => registerNavigator(paneId, null);
+  }, [paneId, navigate, registerNavigator]);
   useEffect(() => { onPathChange(paneId, path); }, [paneId, path, onPathChange]);
 
   const load = useCallback(async () => {
@@ -161,9 +163,7 @@ export default function Pane({
     const opts = await resolveConflictMode(clipboard.paths, path);
     if (!opts) return; // 사용자가 취소
     if (clipboard.mode === 'copy') {
-      const res = await window.api.copyStart(clipboard.paths, path, opts);
-      if (!res.ok) { alert(res.error); return; }
-      setCopyJob({ jobId: res.jobId, copied: 0, total: 0, currentFile: '' });
+      await startCopy(clipboard.paths, path, opts);
       return;
     }
     const res = await window.api.move(clipboard.paths, path, opts);
@@ -171,26 +171,7 @@ export default function Pane({
     else if (res.items?.length) recordOp({ type: 'move', items: res.items });
     setClipboard(null);
     load();
-  }, [clipboard, path, setClipboard, load]);
-
-  // 진행 중인 복사 작업의 진행률 이벤트 반영
-  useEffect(() => {
-    if (!copyJob) return;
-    const off = window.api.onCopyProgress((d) => {
-      if (d.jobId !== copyJob.jobId) return;
-      if (d.done) {
-        setCopyJob(null);
-        if (d.error) alert(d.error);
-        else if (!d.canceled && d.created?.length) recordOp({ type: 'copy', created: d.created });
-        load();
-      } else {
-        setCopyJob((j) => (j && j.jobId === d.jobId
-          ? { ...j, copied: d.copied, total: d.total, currentFile: d.currentFile }
-          : j));
-      }
-    });
-    return off;
-  }, [copyJob?.jobId, load]);
+  }, [clipboard, path, setClipboard, startCopy, load]);
 
   const doTrash = useCallback(async () => {
     if (!selectedPaths.length) return;
@@ -661,22 +642,6 @@ export default function Pane({
         </div>
         {showPreview && <Preview entry={selectedEntries[0] || null} />}
       </div>
-
-      {copyJob && (
-        <div className="copy-progress">
-          <span className="cp-info">
-            복사 중… {copyJob.currentFile ? basename(copyJob.currentFile) : '준비 중'}
-            {copyJob.total > 0 && ` (${formatSize(copyJob.copied) || '0 B'} / ${formatSize(copyJob.total)})`}
-          </span>
-          <div className="cp-bar">
-            <div
-              className="cp-fill"
-              style={{ width: `${copyJob.total ? Math.min(100, (copyJob.copied / copyJob.total) * 100) : 0}%` }}
-            />
-          </div>
-          <button className="cp-cancel" onClick={() => window.api.copyCancel(copyJob.jobId)}>취소</button>
-        </div>
-      )}
 
       <div className="statusbar">
         <span>{displayed.length}개 항목{selectedPaths.length > 0 ? ` · ${selectedPaths.length}개 선택됨` : ''}</span>

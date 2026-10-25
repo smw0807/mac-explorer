@@ -164,13 +164,15 @@ ipcMain.handle('fs:copyStart', (e, paths, destDir, opts = {}) => {
   const job = { canceled: false, controller: new AbortController() };
   copyJobs.set(jobId, job);
   const sender = e.sender;
+  const onDestroyed = () => { job.canceled = true; job.controller.abort(); };
+  sender.once('destroyed', onDestroyed);
 
   (async () => {
     const report = { copied: 0, total: 0, currentFile: '' };
     const send = (extra = {}) => {
       if (!sender.isDestroyed()) {
         sender.send('fs:copyProgress', {
-          jobId, copied: report.copied, total: report.total, currentFile: report.currentFile, ...extra,
+          jobId, destDir, copied: report.copied, total: report.total, currentFile: report.currentFile, ...extra,
         });
       }
     };
@@ -189,9 +191,10 @@ ipcMain.handle('fs:copyStart', (e, paths, destDir, opts = {}) => {
       send({ done: true, created });
     } catch (err) {
       clearInterval(timer);
-      send({ done: true, canceled: !!err.canceled, error: err.canceled ? null : (err.message || String(err)) });
+      send({ done: true, created, canceled: !!err.canceled, error: err.canceled ? null : (err.message || String(err)) });
     } finally {
       copyJobs.delete(jobId);
+      sender.removeListener('destroyed', onDestroyed);
     }
   })();
 

@@ -8,7 +8,7 @@ const dom = new JSDOM('<!doctype html><html><body></body></html>', {
   url: 'http://localhost/',
   pretendToBeVisual: true,
 });
-for (const name of ['window', 'document', 'navigator', 'HTMLElement', 'Node', 'Event', 'MouseEvent', 'KeyboardEvent']) {
+for (const name of ['window', 'document', 'navigator', 'HTMLElement', 'Node', 'Event', 'CustomEvent', 'MouseEvent', 'KeyboardEvent']) {
   Object.defineProperty(globalThis, name, { configurable: true, writable: true, value: dom.window[name] });
 }
 globalThis.getComputedStyle = dom.window.getComputedStyle.bind(dom.window);
@@ -19,27 +19,24 @@ dom.window.HTMLElement.prototype.scrollIntoView = () => {};
 const React = require('react');
 const { createRoot } = require('react-dom/client');
 const { act } = React;
-const components = new Map();
 const projectRoot = path.resolve(__dirname, '../..');
 
 function loadComponent(relativePath) {
-  if (!components.has(relativePath)) {
-    const filename = path.join(projectRoot, relativePath);
-    const result = buildSync({
-      entryPoints: [filename],
-      bundle: true,
-      write: false,
-      platform: 'node',
-      format: 'cjs',
-      external: ['react', 'react-dom', 'react-dom/*'],
-    });
-    const compiled = new Module(filename, module);
-    compiled.filename = filename;
-    compiled.paths = Module._nodeModulePaths(path.dirname(filename));
-    compiled._compile(result.outputFiles[0].text, filename);
-    components.set(relativePath, compiled.exports.default);
-  }
-  return components.get(relativePath);
+  const filename = path.join(projectRoot, relativePath);
+  const result = buildSync({
+    entryPoints: [filename],
+    bundle: true,
+    write: false,
+    platform: 'node',
+    format: 'cjs',
+    external: ['react', 'react-dom', 'react-dom/*'],
+  });
+  // Each mount gets fresh module state, including the application's undo history.
+  const compiled = new Module(filename, module);
+  compiled.filename = filename;
+  compiled.paths = Module._nodeModulePaths(path.dirname(filename));
+  compiled._compile(result.outputFiles[0].text, filename);
+  return compiled.exports.default;
 }
 
 function file(name, options = {}) {
@@ -134,6 +131,23 @@ async function mountPane({ entries = [], props = {}, api = {} } = {}) {
   });
 }
 
+async function mountApp({ entries = [], api = {} } = {}) {
+  return mountComponent('src/App.jsx', {
+    api: {
+      specialDirs: async () => ({
+        home: '/test', desktop: '/test/Desktop', documents: '/test/Documents',
+        downloads: '/test/Downloads', pictures: '/test/Pictures', applications: '/Applications', volumes: [],
+      }),
+      settingsGet: async () => ({ settings: {} }),
+      settingsSet: async () => ({ ok: true }),
+      exists: async () => ({ exists: true, isDir: true }),
+      conflicts: async () => ({ ok: true, names: [] }),
+      readDir: async () => ({ ok: true, entries }),
+      ...api,
+    },
+  });
+}
+
 async function click(element, options = {}) {
   await flush(() => element.dispatchEvent(new MouseEvent('click', { bubbles: true, ...options })));
 }
@@ -150,4 +164,4 @@ async function changeValue(element, value) {
   });
 }
 
-module.exports = { mountComponent, mountPane, file, deferred, flush, click, key, changeValue };
+module.exports = { mountComponent, mountPane, mountApp, file, deferred, flush, click, key, changeValue };
