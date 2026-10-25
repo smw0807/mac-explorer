@@ -160,8 +160,13 @@ async function assertUnchanged(root, snapshot, label, options) {
   }
 }
 
-async function prepareCommitSnapshot(staged, sourceSnapshot) {
-  const snapshot = await captureSnapshot(staged);
+async function prepareCommitSnapshot(staged, sourceSnapshot, sourceStaged) {
+  // A same-filesystem move keeps the source inode, including any editor's open
+  // descriptor. Metadata collection must not adopt edits made after validation
+  // into an earlier Undo receipt. Copies have new inodes and cannot use this check.
+  const snapshot = sourceStaged
+    ? await assertSnapshot(staged, sourceSnapshot, { allowRootRename: true })
+    : await captureSnapshot(staged);
   // Snapshot reads can update directory/link atime. Restore it inside the private
   // staging area, then record the ctime produced by our own timestamp restoration.
   for (const relative of Object.keys(snapshot.entries).reverse()) {
@@ -244,8 +249,11 @@ async function transferItem(src, destDir, opts, moving, writer = copyTree) {
         job: opts.job, allowRootRename: sourceStaged,
       });
       if (opts.onCommitted || opts.onRestored) {
-        try { stagedSnapshot = await prepareCommitSnapshot(staged, sourceSnapshot); }
-        catch { stagedSnapshot = null; }
+        try { stagedSnapshot = await prepareCommitSnapshot(staged, sourceSnapshot, sourceStaged); }
+        catch (err) {
+          if (sourceStaged && err.code === 'FS_CHANGED') throw err;
+          stagedSnapshot = null;
+        }
       }
       if (!sourceStaged) await assertUnchanged(source, sourceSnapshot, '원본', { job: opts.job });
       if (destinationSnapshot) await assertUnchanged(dest, destinationSnapshot, '대상', { job: opts.job });

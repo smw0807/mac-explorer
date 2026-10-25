@@ -684,6 +684,124 @@ test('Undo lineage survives EXDEV moves and updates the earlier creation inode',
   await assertMissing(dest);
 });
 
+test('Undo lineage survives an unchanged same-filesystem create and move', async (t) => {
+  const { sourceDir, destDir } = await fixture(t);
+  const owner = Object.assign(new EventEmitter(), { isDestroyed: () => false });
+  const registry = createUndoRegistry({ moveItem: operations.moveItem, trashItem: (p) => fsp.rm(p) });
+  let created;
+  const source = await operations.createItem(sourceDir, 'item', {
+    onCommitted(value) { created = registry.recordCreate(owner, value); },
+  });
+  let metadata;
+  const dest = await operations.moveItem(source, destDir, { onCommitted(value) { metadata = value; } });
+  const moved = registry.recordMove(owner, metadata);
+  assert.equal((await registry.undo(owner, moved.token)).ok, true);
+  await assertText(source, '');
+  assert.equal((await registry.undo(owner, created.token)).ok, true);
+  await assertMissing(source);
+  await assertMissing(dest);
+});
+
+for (const occupyDestination of [false, true]) {
+  test(`metadata preparation cannot adopt an editor save into Undo${occupyDestination ? ' during a conflicting move rollback' : ''}`, async (t) => {
+    const { sourceDir, destDir } = await fixture(t);
+    const source = path.join(sourceDir, 'item');
+    const dest = path.join(destDir, 'item');
+    const owner = Object.assign(new EventEmitter(), { isDestroyed: () => false });
+    const trashed = [];
+    const registry = createUndoRegistry({ moveItem: operations.moveItem, trashItem: async (p) => {
+      trashed.push(p);
+      await fsp.rm(p);
+    } });
+    let created;
+    await operations.createItem(sourceDir, 'item', {
+      onCommitted(value) { created = registry.recordCreate(owner, value); },
+    });
+    const editor = await fsp.open(source, 'r+');
+    t.after(() => editor.close());
+    let stagedStats = 0;
+    let committedMetadata;
+    const isolated = loadOperations({ fsp: {
+      async lstat(p, ...args) {
+        const stat = await fsp.lstat(p, ...args);
+        if (path.basename(p) === 'new' && path.dirname(p).startsWith(path.join(destDir, '.mac-explorer-'))
+          && ++stagedStats === 2) {
+          // Save through the already-open source descriptor just after the first
+          // staged-source check, before the separate Undo metadata traversal.
+          await editor.writeFile('saved by external editor');
+          if (occupyDestination) await fsp.writeFile(dest, 'created externally');
+        }
+        return stat;
+      },
+    } });
+    await assert.rejects(isolated.moveItem(source, destDir, {
+      onCommitted(value) { committedMetadata = value; },
+      onRestored(value) { registry.restored(owner, value); },
+    }), { code: 'FS_CHANGED' });
+    assert.ok(stagedStats >= 2);
+    assert.equal(committedMetadata, undefined);
+    await assertText(source, 'saved by external editor');
+    assert.equal((await registry.undo(owner, created.token)).ok, false);
+    assert.deepEqual(trashed, []);
+    await assertText(source, 'saved by external editor');
+    if (occupyDestination) await assertText(dest, 'created externally');
+    else await assertMissing(dest);
+    await assertNoWorkspace(destDir);
+  });
+}
+
+test('metadata preparation rollback preserves editor changes after restoring another file atime', async (t) => {
+  const { sourceDir, destDir } = await fixture(t);
+  const seed = path.join(sourceDir, 'folder');
+  await fsp.mkdir(seed);
+  for (const name of ['a', 'z']) {
+    const p = path.join(seed, name);
+    await fsp.writeFile(p, name);
+    await fsp.utimes(p, new Date('2001-01-01Z'), new Date('2002-01-01Z'));
+  }
+  const owner = Object.assign(new EventEmitter(), { isDestroyed: () => false });
+  const trashed = [];
+  const registry = createUndoRegistry({ moveItem: operations.moveItem, trashItem: async (p) => { trashed.push(p); } });
+  let created;
+  const source = await operations.copyItem(seed, sourceDir, {
+    onCommitted(value) { created = registry.recordCreate(owner, value); },
+  });
+  const editor = await fsp.open(path.join(source, 'a'), 'r+');
+  t.after(() => editor.close());
+  let edited = false;
+  let committedMetadata;
+  let restoredMetadata;
+  const isolated = loadOperations({ fsp: {
+    async rename(from, to) {
+      await fsp.rename(from, to);
+      if (from === source) {
+        // Actual file reads change only atime, so they must not invalidate the move.
+        await fsp.readFile(path.join(to, 'a'));
+        await fsp.readFile(path.join(to, 'z'));
+      }
+    },
+    async utimes(p, ...args) {
+      await fsp.utimes(p, ...args);
+      if (path.basename(p) === 'z' && !edited) {
+        edited = true;
+        await editor.writeFile('external edit while restoring metadata');
+      }
+    },
+  } });
+  await assert.rejects(isolated.moveItem(source, destDir, {
+    onCommitted(value) { committedMetadata = value; },
+    onRestored(value) { restoredMetadata = value; registry.restored(owner, value); },
+  }), { code: 'FS_CHANGED' });
+  assert.equal(edited, true);
+  assert.equal(committedMetadata, undefined);
+  assert.equal(restoredMetadata, undefined);
+  await assertText(path.join(source, 'a'), 'external edit while restoring metadata');
+  await assertText(path.join(source, 'z'), 'z');
+  assert.equal((await registry.undo(owner, created.token)).ok, false);
+  assert.deepEqual(trashed, []);
+  await assertNoWorkspace(destDir);
+});
+
 test('Undo can retry after a verified rollback changes its own source ctime', async (t) => {
   const { sourceDir } = await fixture(t);
   const original = path.join(sourceDir, 'original');
