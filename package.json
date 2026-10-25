@@ -8,7 +8,8 @@
     "dev": "concurrently -k \"vite\" \"wait-on http://localhost:5173 && VITE_DEV=1 electron .\"",
     "build": "vite build",
     "start": "npm run build && electron .",
-    "dist": "npm run build && electron-builder --mac"
+    "dist": "npm run build && electron-builder --mac",
+    "test": "node --test test/*.test.cjs"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.3.0",
@@ -27,10 +28,21 @@
     "mac": {
       "category": "public.app-category.utilities",
       "target": [
-        { "target": "dmg", "arch": ["arm64", "x64"] }
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
       ]
     },
-    "files": ["dist/**/*", "electron/**/*"],
-    "directories": { "output": "release" }
+    "files": [
+      "dist/**/*",
+      "electron/**/*"
+    ],
+    "directories": {
+      "output": "release"
+    }
   }
 }

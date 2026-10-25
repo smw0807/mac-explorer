@@ -30,7 +30,8 @@ export function extractDropPaths(e) {
 // 충돌이 있으면 사용자에게 물어 정책을 결정. 취소면 null, 아니면 move/copy에 넘길 opts.
 export async function resolveConflictMode(paths, destDir) {
   const res = await window.api.conflicts(paths, destDir);
-  if (!res.ok || res.names.length === 0) return {};
+  if (!res.ok) { alert(res.error); return null; }
+  if (res.names.length === 0) return {};
   const c = await window.api.confirmConflict(res.names);
   if (!c.ok || c.choice === 'cancel') return null;
   return { conflict: c.choice };

@@ -1,0 +1,184 @@
+const fs = require('fs');
+const fsp = require('fs/promises');
+const path = require('path');
+const { pipeline } = require('stream/promises');
+
+async function statEntry(p) {
+  try { return await fsp.lstat(p); }
+  catch (err) { if (err.code === 'ENOENT') return null; throw err; }
+}
+
+async function uniqueDest(dir, name) {
+  const ext = path.extname(name);
+  const base = path.basename(name, ext);
+  let dest = path.join(dir, name);
+  for (let i = 1; await statEntry(dest); i++) {
+    dest = path.join(dir, `${base} copy${i > 1 ? ' ' + i : ''}${ext}`);
+  }
+  return dest;
+}
+
+function contains(parent, child) {
+  const relative = path.relative(parent, child);
+  return relative === '' || (!relative.startsWith('..' + path.sep) && relative !== '..' && !path.isAbsolute(relative));
+}
+
+async function planDestination(src, destDir, conflict, moving) {
+  src = path.resolve(src);
+  const sourceParent = await fsp.realpath(path.dirname(src));
+  const source = path.join(sourceParent, path.basename(src));
+  const dir = await fsp.realpath(destDir);
+  const sourceStat = await fsp.lstat(source);
+  if (sourceStat.isDirectory() && contains(await fsp.realpath(source), dir)) {
+    throw new Error('폴더 자신이나 하위 폴더로 복사·이동할 수 없습니다.');
+  }
+  if (moving && sourceParent === dir) return null;
+  let dest = path.join(dir, path.basename(source));
+  if (sourceParent === dir) dest = await uniqueDest(dir, path.basename(source));
+  let existing = await statEntry(dest);
+  if (existing) {
+    if (conflict === 'skip') return null;
+    if (conflict === 'keepBoth') {
+      dest = await uniqueDest(dir, path.basename(source));
+      existing = null;
+    } else if (conflict !== 'overwrite') {
+      throw new Error(`이미 존재합니다: ${path.basename(source)}`);
+    }
+  }
+  if (existing?.isDirectory() && contains(await fsp.realpath(dest), source)) {
+    throw new Error('원본을 포함한 폴더를 덮어쓸 수 없습니다.');
+  }
+  return { source, dest, existing };
+}
+
+async function validateBatch(paths, destDir, opts = {}) {
+  const dir = await fsp.realpath(destDir);
+  const sources = await Promise.all(paths.map(async (src) =>
+    path.join(await fsp.realpath(path.dirname(path.resolve(src))), path.basename(src))));
+  // One replacement must never delete another selected source in the same batch.
+  if (opts.conflict === 'overwrite') {
+    for (const source of sources) {
+      const dest = path.join(dir, path.basename(source));
+      if ((await statEntry(dest))?.isDirectory()) {
+        const actual = await fsp.realpath(dest);
+        if (sources.some((other) => other !== dest && contains(actual, other))) {
+          throw new Error('선택한 원본을 포함한 폴더를 덮어쓸 수 없습니다.');
+        }
+      }
+    }
+  }
+}
+
+function cancelError() { return Object.assign(new Error('취소됨'), { canceled: true }); }
+function checkCanceled(job) { if (job?.canceled || job?.controller?.signal.aborted) throw cancelError(); }
+
+async function treeSize(src, job) {
+  checkCanceled(job);
+  const st = await fsp.lstat(src);
+  if (!st.isDirectory()) return st.isSymbolicLink() ? 0 : st.size;
+  let total = 0;
+  for (const name of await fsp.readdir(src)) total += await treeSize(path.join(src, name), job);
+  return total;
+}
+
+async function copyTree(src, dest, { job, report } = {}) {
+  checkCanceled(job);
+  const st = await fsp.lstat(src);
+  if (st.isSymbolicLink()) {
+    await fsp.symlink(await fsp.readlink(src), dest);
+  } else if (st.isDirectory()) {
+    await fsp.mkdir(dest);
+    for (const name of await fsp.readdir(src)) {
+      await copyTree(path.join(src, name), path.join(dest, name), { job, report });
+    }
+  } else if (st.isFile()) {
+    if (report) report.currentFile = src;
+    const input = fs.createReadStream(src);
+    input.on('data', (chunk) => { if (report) report.copied += chunk.length; });
+    try {
+      await pipeline(input, fs.createWriteStream(dest, { flags: 'wx' }), { signal: job?.controller?.signal });
+    } catch (err) { checkCanceled(job); throw err; }
+  } else {
+    throw new Error(`지원하지 않는 파일 유형입니다: ${src}`);
+  }
+  checkCanceled(job);
+}
+
+// Serialize only the short commit section; concurrent copies can still stage in parallel.
+let commitTail = Promise.resolve();
+async function withCommitLock(fn) {
+  const previous = commitTail;
+  let release;
+  commitTail = new Promise((resolve) => { release = resolve; });
+  await previous;
+  try { return await fn(); } finally { release(); }
+}
+
+function sameEntry(a, b) {
+  return a === null ? b === null : b !== null && a.dev === b.dev && a.ino === b.ino
+    && a.mtimeMs === b.mtimeMs && a.ctimeMs === b.ctimeMs && a.size === b.size;
+}
+
+async function transferItem(src, destDir, opts, moving, writer = copyTree) {
+  const plan = await planDestination(src, destDir, opts.conflict, moving);
+  if (!plan) return null;
+  const { source, dest, existing } = plan;
+  checkCanceled(opts.job);
+  const workspace = await fsp.mkdtemp(path.join(path.dirname(dest), '.mac-explorer-'));
+  const staged = path.join(workspace, 'new');
+  const backup = path.join(workspace, 'previous');
+  let sourceStaged = false;
+  let committed = false;
+  let preserveWorkspace = false;
+  try {
+    if (moving) {
+      try { await fsp.rename(source, staged); sourceStaged = true; }
+      catch (err) { if (err.code !== 'EXDEV') throw err; await writer(source, staged, opts); }
+    } else {
+      await writer(source, staged, opts);
+    }
+    await withCommitLock(async () => {
+      checkCanceled(opts.job);
+      if (!sameEntry(existing, await statEntry(dest))) throw new Error(`작업 중 대상이 변경되었습니다: ${dest}`);
+      let backedUp = false;
+      try {
+        if (existing) { await fsp.rename(dest, backup); backedUp = true; }
+        await fsp.rename(staged, dest);
+        committed = true;
+      } catch (err) {
+        if (backedUp) {
+          try {
+            if (await statEntry(dest)) throw new Error('대상 경로가 사용 중입니다.');
+            await fsp.rename(backup, dest);
+          } catch (restoreError) {
+            preserveWorkspace = true;
+            err.message += ` 기존 항목 복구 위치: ${backup} (${restoreError.message})`;
+          }
+        }
+        throw err;
+      }
+    });
+    // After commit the destination is the complete copy. Never remove it if source cleanup fails.
+    if (moving && !sourceStaged) await fsp.rm(source, { recursive: true });
+    return dest;
+  } catch (err) {
+    if (sourceStaged && !committed) {
+      try {
+        if (await statEntry(source)) throw new Error('원본 경로가 사용 중입니다.');
+        await fsp.rename(staged, source);
+      } catch (restoreError) {
+        preserveWorkspace = true;
+        err.message += ` 원본 복구 위치: ${staged} (${restoreError.message})`;
+      }
+    }
+    if (committed) err.committedDest = dest;
+    throw err;
+  } finally {
+    if (!preserveWorkspace) await fsp.rm(workspace, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+const copyItem = (src, dir, opts = {}, writer) => transferItem(src, dir, opts, false, writer);
+const moveItem = (src, dir, opts = {}, writer) => transferItem(src, dir, opts, true, writer);
+
+module.exports = { statEntry, uniqueDest, copyItem, moveItem, copyTree, treeSize, cancelError, validateBatch };

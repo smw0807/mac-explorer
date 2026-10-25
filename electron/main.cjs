@@ -7,6 +7,7 @@ const { pathToFileURL } = require('url');
 const { execFile } = require('child_process');
 const { promisify } = require('util');
 const execFileP = promisify(execFile);
+const { statEntry, uniqueDest, copyItem, moveItem, treeSize, cancelError, validateBatch } = require('./file-operations.cjs');
 
 // custom protocol for previewing local files (images/video) in the renderer
 protocol.registerSchemesAsPrivileged([
@@ -85,18 +86,6 @@ async function entryInfo(dirPath, name) {
   };
 }
 
-async function uniqueDest(destDir, name) {
-  let candidate = path.join(destDir, name);
-  const ext = path.extname(name);
-  const base = path.basename(name, ext);
-  let i = 1;
-  while (fs.existsSync(candidate)) {
-    candidate = path.join(destDir, `${base} copy${i > 1 ? ' ' + i : ''}${ext}`);
-    i++;
-  }
-  return candidate;
-}
-
 function ok(data) { return { ok: true, ...data }; }
 function fail(err) { return { ok: false, error: err.message || String(err) }; }
 
@@ -130,11 +119,14 @@ ipcMain.handle('fs:specialDirs', async () => {
 
 // destDir에서 같은 이름이 이미 있는 항목 목록 (같은 폴더 내 복사는 자동으로 이름이 바뀌므로 제외)
 ipcMain.handle('fs:conflicts', async (_e, paths, destDir) => {
-  const names = paths
-    .filter((p) => path.dirname(p) !== destDir)
-    .map((p) => path.basename(p))
-    .filter((name) => fs.existsSync(path.join(destDir, name)));
-  return ok({ names });
+  try {
+    const names = [];
+    for (const p of paths) {
+      if (path.resolve(path.dirname(p)) !== path.resolve(destDir)
+        && await statEntry(path.join(destDir, path.basename(p)))) names.push(path.basename(p));
+    }
+    return ok({ names });
+  } catch (err) { return fail(err); }
 });
 
 ipcMain.handle('ui:confirmConflict', async (e, names) => {
@@ -150,30 +142,13 @@ ipcMain.handle('ui:confirmConflict', async (e, names) => {
   return ok({ choice: ['keepBoth', 'overwrite', 'skip', 'cancel'][r.response] });
 });
 
-// 충돌 정책 적용: 최종 dest 경로를 돌려주고, skip이면 null
-async function resolveDest(p, destDir, conflict) {
-  let dest = path.join(destDir, path.basename(p));
-  if (path.dirname(p) === destDir) return uniqueDest(destDir, path.basename(p));
-  if (fs.existsSync(dest)) {
-    if (conflict === 'skip') return null;
-    if (conflict === 'keepBoth') return uniqueDest(destDir, path.basename(p));
-    if (conflict === 'overwrite') {
-      await fsp.rm(dest, { recursive: true, force: true });
-      return dest;
-    }
-    throw new Error(`이미 존재합니다: ${path.basename(p)}`);
-  }
-  return dest;
-}
-
 ipcMain.handle('fs:copy', async (_e, paths, destDir, opts = {}) => {
   try {
+    await validateBatch(paths, destDir, opts);
     const created = [];
     for (const p of paths) {
-      const dest = await resolveDest(p, destDir, opts.conflict);
-      if (!dest) continue;
-      await fsp.cp(p, dest, { recursive: true, errorOnExist: true, force: false });
-      created.push(dest);
+      const dest = await copyItem(p, destDir, opts);
+      if (dest) created.push(dest);
     }
     return ok({ created });
   } catch (err) { return fail(err); }
@@ -184,57 +159,9 @@ ipcMain.handle('fs:copy', async (_e, paths, destDir, opts = {}) => {
 let copyJobSeq = 0;
 const copyJobs = new Map(); // jobId → { canceled }
 
-async function treeSize(p) {
-  const st = await fsp.lstat(p);
-  if (!st.isDirectory()) return st.size;
-  let sum = 0;
-  for (const n of await fsp.readdir(p)) sum += await treeSize(path.join(p, n));
-  return sum;
-}
-
-function cancelError() {
-  return Object.assign(new Error('취소됨'), { canceled: true });
-}
-
-function copyFileStream(job, src, dest, onBytes) {
-  return new Promise((resolve, reject) => {
-    const rs = fs.createReadStream(src);
-    const ws = fs.createWriteStream(dest, { flags: 'wx' });
-    rs.on('data', (chunk) => {
-      if (job.canceled) {
-        rs.destroy();
-        ws.destroy();
-        reject(cancelError());
-        return;
-      }
-      onBytes(chunk.length);
-    });
-    rs.on('error', reject);
-    ws.on('error', reject);
-    ws.on('close', resolve);
-    rs.pipe(ws);
-  });
-}
-
-async function copyTree(job, src, dest, report) {
-  if (job.canceled) throw cancelError();
-  const st = await fsp.lstat(src);
-  if (st.isSymbolicLink()) {
-    await fsp.symlink(await fsp.readlink(src), dest);
-  } else if (st.isDirectory()) {
-    await fsp.mkdir(dest);
-    for (const n of await fsp.readdir(src)) {
-      await copyTree(job, path.join(src, n), path.join(dest, n), report);
-    }
-  } else {
-    report.currentFile = src;
-    await copyFileStream(job, src, dest, (n) => { report.copied += n; });
-  }
-}
-
 ipcMain.handle('fs:copyStart', (e, paths, destDir, opts = {}) => {
   const jobId = ++copyJobSeq;
-  const job = { canceled: false };
+  const job = { canceled: false, controller: new AbortController() };
   copyJobs.set(jobId, job);
   const sender = e.sender;
 
@@ -248,25 +175,20 @@ ipcMain.handle('fs:copyStart', (e, paths, destDir, opts = {}) => {
       }
     };
     const timer = setInterval(() => send(), 100);
-    let inFlightDest = null; // 복사가 끝나지 않은 항목만 취소/실패 시 정리
     const created = [];
     try {
-      for (const p of paths) report.total += await treeSize(p);
+      await validateBatch(paths, destDir, opts);
+      for (const p of paths) report.total += await treeSize(p, job);
       send();
       for (const p of paths) {
         if (job.canceled) throw cancelError();
-        const dest = await resolveDest(p, destDir, opts.conflict);
-        if (!dest) continue;
-        inFlightDest = dest;
-        await copyTree(job, p, dest, report);
-        created.push(dest);
-        inFlightDest = null;
+        const dest = await copyItem(p, destDir, { ...opts, job, report });
+        if (dest) created.push(dest);
       }
       clearInterval(timer);
       send({ done: true, created });
     } catch (err) {
       clearInterval(timer);
-      if (inFlightDest) await fsp.rm(inFlightDest, { recursive: true, force: true }).catch(() => {});
       send({ done: true, canceled: !!err.canceled, error: err.canceled ? null : (err.message || String(err)) });
     } finally {
       copyJobs.delete(jobId);
@@ -278,31 +200,17 @@ ipcMain.handle('fs:copyStart', (e, paths, destDir, opts = {}) => {
 
 ipcMain.handle('fs:copyCancel', (_e, jobId) => {
   const job = copyJobs.get(jobId);
-  if (job) job.canceled = true;
+  if (job) { job.canceled = true; job.controller.abort(); }
   return ok({});
 });
 
 ipcMain.handle('fs:move', async (_e, paths, destDir, opts = {}) => {
   try {
+    await validateBatch(paths, destDir, opts);
     const items = [];
     for (const p of paths) {
-      if (path.dirname(p) === destDir) continue;
-      let dest = path.join(destDir, path.basename(p));
-      if (fs.existsSync(dest)) {
-        if (opts.conflict === 'skip') continue;
-        else if (opts.conflict === 'keepBoth') dest = await uniqueDest(destDir, path.basename(p));
-        else if (opts.conflict === 'overwrite') await fsp.rm(dest, { recursive: true, force: true });
-        else throw new Error(`이미 존재합니다: ${path.basename(p)}`);
-      }
-      try {
-        await fsp.rename(p, dest);
-      } catch (err) {
-        if (err.code === 'EXDEV') {
-          await fsp.cp(p, dest, { recursive: true });
-          await fsp.rm(p, { recursive: true });
-        } else throw err;
-      }
-      items.push({ from: p, to: dest });
+      const dest = await moveItem(p, destDir, opts);
+      if (dest) items.push({ from: p, to: dest });
     }
     return ok({ items });
   } catch (err) { return fail(err); }
@@ -318,7 +226,7 @@ ipcMain.handle('fs:trash', async (_e, paths) => {
 ipcMain.handle('fs:rename', async (_e, p, newName) => {
   try {
     const dest = path.join(path.dirname(p), newName);
-    if (fs.existsSync(dest)) throw new Error(`이미 존재합니다: ${newName}`);
+    if (await statEntry(dest)) throw new Error(`이미 존재합니다: ${newName}`);
     await fsp.rename(p, dest);
     return ok({ path: dest });
   } catch (err) { return fail(err); }
