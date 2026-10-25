@@ -8,6 +8,7 @@ const { execFile } = require('child_process');
 const { promisify } = require('util');
 const execFileP = promisify(execFile);
 const { statEntry, uniqueDest, copyItem, moveItem, treeSize, cancelError, validateBatch } = require('./file-operations.cjs');
+const { compress } = require('./archive.cjs');
 
 // custom protocol for previewing local files (images/video) in the renderer
 protocol.registerSchemesAsPrivileged([
@@ -328,12 +329,7 @@ ipcMain.handle('fs:exists', async (_e, p) => {
 // 선택 항목들을 같은 폴더에 zip으로 압축 (Finder처럼 단일 항목은 그 이름, 여러 개면 '보관')
 ipcMain.handle('fs:compress', async (_e, paths) => {
   try {
-    const cwd = path.dirname(paths[0]);
-    const zipName = (paths.length === 1 ? path.basename(paths[0]) : '보관') + '.zip';
-    const zipPath = await uniqueDest(cwd, zipName);
-    await execFileP('/usr/bin/zip', ['-r', '-y', zipPath, ...paths.map((p) => path.basename(p))],
-      { cwd, maxBuffer: 64 * 1024 * 1024 });
-    return ok({ path: zipPath });
+    return ok({ path: await compress(paths) });
   } catch (err) { return fail(err); }
 });
 
